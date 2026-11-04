@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camera Registration</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1 id="title">Camera registration and fire-edge mapping</h1>
+  <div class="still-nav">
+    <div class="still-track">
+      <button id="prev" title="Previous still (←)">◀</button>
+      <div class="slider-wrap">
+        <input id="stillSlider" type="range" min="0" max="0" value="0" aria-label="Still">
+        <div id="edgeMarks" class="edge-marks" title="Stills with fire edges drawn (click a mark to go there)"></div>
+      </div>
+      <button id="next" title="Next still (→)">▶</button>
+    </div>
+    <div class="still-info">
+      <span id="stillTime" class="mono"></span>
+      <span id="stillBar" class="mono muted"></span>
+      <span id="stillWarn" class="warn off"></span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="left">
+    <div id="viewer">
+      <canvas id="canvas" tabindex="0"></canvas>
+      <div id="prompt" class="prompt" hidden></div>
+      <div class="viewer-tools">
+        <span id="cursor" class="mono"></span>
+        <button id="fit" title="Fit image (F)">Fit</button>
+      </div>
+    </div>
+    <p class="hint">Scroll to zoom · drag to pan (right-drag or Space+drag while a tool is active) · Esc cancels · Enter or double-click finishes a line · Backspace removes the last vertex · Ctrl/⌘+Z or Undo undoes</p>
+    <div id="mapWrap">
+      <div id="map"></div>
+      <p class="hint">Map: click to see where a point falls in the photo (cyan +). While adding a landmark, a map click fills its lat/lon/elevation from the DEM.</p>
+    </div>
+  </section>
+
+  <aside>
+    <div class="card">
+      <h2>Fire edges</h2>
+      <div class="btns">
+        <button data-act="clickTerrain">Click terrain</button>
+        <button data-act="freehandEdge">Freehand edge</button>
+        <button data-act="polylineEdge">Polyline edge</button>
+        <button data-act="undo" title="Undo the last vertex while drawing, otherwise the last edge change (Ctrl/⌘+Z)">Undo</button>
+        <button data-act="clearEdges" title="Remove the edges drawn on this still">Clear edges</button>
+      </div>
+      <div id="terrainOut" class="mono small" hidden></div>
+      <ul id="edgeList" class="list"></ul>
+      <div class="row export"><input id="exportName" aria-label="Export base name"><button data-act="exportEdges">Export CSV + KML</button></div>
+      <label class="check small"><input type="checkbox" id="timeStamps" checked> Time-stamp each line in the KML (Google Earth time slider)</label>
+    </div>
+
+    <div class="card">
+      <pre id="status" class="mono"></pre>
+    </div>
+
+    <div class="card">
+      <h2>Camera pose</h2>
+      <table class="pose mono">
+        <thead><tr><th></th><th>Az</th><th>Tilt</th><th>Roll</th><th>HFOV</th></tr></thead>
+        <tbody>
+          <tr><th>Frame bar</th><td id="barX"></td><td id="barY"></td><td>–</td><td id="barZ"></td></tr>
+          <tr><th>Mount corr.</th><td id="c0"></td><td id="c1"></td><td id="c2"></td><td id="c3"></td></tr>
+          <tr class="total"><th>Model</th><td id="q0"></td><td id="q1"></td><td id="q2"></td><td id="q3"></td></tr>
+        </tbody>
+      </table>
+      <p id="calibLine" class="small"></p>
+      <p id="leanLine" class="mono small"></p>
+      <p class="muted small">The pose follows each frame's info bar (X pan, Y tilt, Z zoom). The mount correction is one fixed offset for this camera, fitted by <b>Optimize</b> from landmarks and the skyline, and applied to every frame. The pan-axis lean comes from a panorama calibration (<code>--panorama</code>) and stays fixed unless “also fit lean” is ticked. HFOV is the Z1 value scaled by 1/Z (assumed).</p>
+      <button id="resetCorr" class="small">Reset correction (raw bar values)</button>
+    </div>
+
+    <div class="card">
+      <h2>Registration</h2>
+      <div class="btns">
+        <button data-act="addGCP">Add landmark</button>
+        <button data-act="traceSky">Trace skyline</button>
+        <button data-act="autoSky" title="Detect the skyline on this still automatically (best on clear days)">Auto skyline</button>
+        <button data-act="optimize" class="primary">Optimize correction</button>
+        <button data-act="removeGCP">Remove last landmark</button>
+        <button data-act="clearSky">Clear skyline</button>
+      </div>
+      <label class="check small"><input type="checkbox" id="fitLean"> Optimize also fits the pan-axis lean (needs landmarks on stills at several pan directions)</label>
+      <form id="gcpForm" hidden>
+        <p class="muted">Landmark at pixel <span id="gcpPix" class="mono"></span></p>
+        <label>Name <input id="gcpName" value="Peak"></label>
+        <label>Latitude <input id="gcpLat" inputmode="decimal" placeholder="deg"></label>
+        <label>Longitude <input id="gcpLon" inputmode="decimal" placeholder="deg"></label>
+        <label>Elevation <input id="gcpZ" inputmode="decimal" placeholder="m, DEM datum"></label>
+        <div class="btns"><button type="submit" class="primary">Confirm landmark</button><button type="button" id="gcpCancel">Cancel</button></div>
+      </form>
+      <ul id="gcpList" class="list"></ul>
+    </div>
+
+    <div class="card">
+      <h2>Files <span id="outDir" class="muted small"></span></h2>
+      <div class="row"><input id="calibName" aria-label="Calibration file"><button data-act="saveFit">Save calibration</button></div>
+      <div class="row"><select id="loadName" aria-label="Calibration to load"></select><button data-act="loadFit">Load calibration</button></div>
+    </div>
+
+    <div class="card">
+      <h2>Messages</h2>
+      <ul id="log" class="log mono small"></ul>
+    </div>
+  </aside>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

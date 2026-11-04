@@ -1,0 +1,9 @@
+name: fire-camera
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - scipy
+  - pillow
+  - imageio-ffmpeg   # reads recordings (camstills); brings ffmpeg

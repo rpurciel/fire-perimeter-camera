@@ -1,0 +1,7 @@
+# Moved-aside files (see unused/README.txt)
+unused/
+
+# Python / macOS
+__pycache__/
+*.pyc
+.DS_Store
