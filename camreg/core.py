@@ -46,40 +46,31 @@ def _hgt_corner(path):
     return lat, lon
 
 
-class DEM:
-    """Mosaic of 1-degree HGT tiles with bilinear lookup.
+class GeoGrid:
+    """Elevation grid on a regular lat/lon lattice with bilinear lookup.
 
-    Equivalent to griddedInterpolant(..., 'linear', 'none'): NaN outside the
-    mosaic and wherever a contributing node is a void. Where tiles share an
-    edge row/column the western (then southern) tile's value is kept, as in
-    the MATLAB [W, E(:,2:end)] concatenation.
+    z[i, j] is the elevation at lat0 + i * dlat, lon0 + j * dlon (row 0 = southern edge). Lookups are NaN
+    outside the grid and wherever a contributing node is a void (NaN), as griddedInterpolant(..., 'linear',
+    'none').
     """
 
-    def __init__(self, paths):
-        corners = [_hgt_corner(p) for p in paths]
-        tiles = [read_hgt(p) for p in paths]
-        n = tiles[0].shape[0]
-        if any(t.shape[0] != n for t in tiles):
-            raise ValueError('All tiles must have the same resolution')
-        self.step = 1.0 / (n - 1)
-        self.lat0 = min(c[0] for c in corners)
-        self.lon0 = min(c[1] for c in corners)
-        nlat = (max(c[0] for c in corners) + 1 - self.lat0) * (n - 1) + 1
-        nlon = (max(c[1] for c in corners) + 1 - self.lon0) * (n - 1) + 1
-        z = np.full((nlat, nlon), np.nan)          # row 0 = southern edge
-        order = sorted(range(len(paths)), key=lambda i: (-corners[i][1], -corners[i][0]))
-        for i in order:
-            r0 = (corners[i][0] - self.lat0) * (n - 1)
-            c0 = (corners[i][1] - self.lon0) * (n - 1)
-            z[r0:r0 + n, c0:c0 + n] = tiles[i][::-1]
+    def __init__(self, z, lat0, lon0, dlat, dlon):
         self.z = z
+        self.lat0, self.lon0 = float(lat0), float(lon0)
+        self.dlat, self.dlon = float(dlat), float(dlon)
+
+    @property
+    def bounds(self):
+        """(south, west, north, east) of the grid's nodes."""
+        nr, nc = self.z.shape
+        return self.lat0, self.lon0, self.lat0 + (nr - 1) * self.dlat, self.lon0 + (nc - 1) * self.dlon
 
     def __call__(self, lat, lon):
         lat = np.asarray(lat, float)
         lon = np.asarray(lon, float)
         nr, nc = self.z.shape
-        fr = (lat - self.lat0) / self.step
-        fc = (lon - self.lon0) / self.step
+        fr = (lat - self.lat0) / self.dlat
+        fc = (lon - self.lon0) / self.dlon
         inside = (fr >= 0) & (fr <= nr - 1) & (fc >= 0) & (fc <= nc - 1)
         fr = np.where(inside, fr, 0.0)
         fc = np.where(inside, fc, 0.0)
@@ -91,6 +82,71 @@ class DEM:
         out = ((1 - tr) * ((1 - tc) * z[r, c] + tc * z[r, c + 1])
                + tr * ((1 - tc) * z[r + 1, c] + tc * z[r + 1, c + 1]))
         return np.where(inside, out, np.nan)
+
+
+class DEM(GeoGrid):
+    """Mosaic of 1-degree HGT tiles (SRTM) with bilinear lookup.
+
+    Where tiles share an edge row/column the western (then southern) tile's value is kept, as in
+    the MATLAB [W, E(:,2:end)] concatenation.
+    """
+
+    def __init__(self, paths):
+        corners = [_hgt_corner(p) for p in paths]
+        tiles = [read_hgt(p) for p in paths]
+        n = tiles[0].shape[0]
+        if any(t.shape[0] != n for t in tiles):
+            raise ValueError('All tiles must have the same resolution')
+        self.step = 1.0 / (n - 1)
+        lat0 = min(c[0] for c in corners)
+        lon0 = min(c[1] for c in corners)
+        nlat = (max(c[0] for c in corners) + 1 - lat0) * (n - 1) + 1
+        nlon = (max(c[1] for c in corners) + 1 - lon0) * (n - 1) + 1
+        z = np.full((nlat, nlon), np.nan)          # row 0 = southern edge
+        order = sorted(range(len(paths)), key=lambda i: (-corners[i][1], -corners[i][0]))
+        for i in order:
+            r0 = (corners[i][0] - lat0) * (n - 1)
+            c0 = (corners[i][1] - lon0) * (n - 1)
+            z[r0:r0 + n, c0:c0 + n] = tiles[i][::-1]
+        super().__init__(z, lat0, lon0, self.step, self.step)
+
+
+class LayeredDEM:
+    """A fine elevation grid (e.g. USGS 3DEP 10 m, see dem3dep) over a coarse one (the SRTM mosaic).
+
+    The fine value is used wherever it exists, the coarse one elsewhere. CameraModel samples rays finely
+    (fine_step_m) out to the distance where the fine grid ends in the worst direction (fine_radius_m)."""
+
+    def __init__(self, fine, coarse, fine_step_m=10.0, name=''):
+        self.fine, self.coarse = fine, coarse
+        self.fine_step_m = float(fine_step_m)
+        self.name = name
+
+    def __call__(self, lat, lon):
+        z = self.fine(lat, lon)
+        bad = ~np.isfinite(z)
+        if bad.any():
+            z = np.where(bad, self.coarse(lat, lon), z)
+        return z
+
+    def fine_radius_m(self, lat, lon):
+        """Distance from (lat, lon) to the nearest edge of the fine grid (0 if outside)."""
+        s, w, n, e = self.fine.bounds
+        k = np.radians(1.0) * R_EARTH
+        d = min((lat - s) * k, (n - lat) * k, (lon - w) * k * np.cos(np.radians(lat)),
+                (e - lon) * k * np.cos(np.radians(lat)))
+        return max(0.0, float(d))
+
+
+def sample_distances(dem, cam, step, d_max, d_min=0.0):
+    """Distances along a ray from the camera: every step metres, but every dem.fine_step_m within the
+    fine grid of a LayeredDEM. With a plain DEM: np.arange(d_min, d_max + step / 2, step) exactly as before."""
+    r = dem.fine_radius_m(cam[0], cam[1]) if hasattr(dem, 'fine_radius_m') else 0.0
+    if r <= d_min:
+        return np.arange(d_min, d_max + step / 2, step)
+    r = min(r, d_max)
+    near = np.arange(d_min, r, dem.fine_step_m)
+    return np.concatenate([near, np.arange(near[-1] + step, d_max + step / 2, step)])
 
 
 # ---------------------------------------------------------------- geometry ---
@@ -132,18 +188,25 @@ class CameraModel:
         self.max_range_m = max_range_m
 
     # -- horizon -------------------------------------------------------------
-    def horizon_rays(self, az_lo=0.0, az_hi=105.0, az_step=0.1,
-                     d=np.arange(100, 90000 + 1, 120)):
-        """Rays to the DEM skyline (max elevation angle) for each azimuth."""
+    def horizon_rays(self, az_lo=0.0, az_hi=105.0, az_step=0.1, d=None, chunk=400):
+        """Rays to the DEM skyline (max elevation angle) for each azimuth.
+
+        d: distances sampled along each azimuth; default every 120 m from 100 m to 90 km (every
+        fine_step_m inside the fine grid of a LayeredDEM)."""
+        if d is None:
+            d = (np.arange(100, 90000 + 1, 120) if not hasattr(self.dem, 'fine_radius_m') else
+                 sample_distances(self.dem, self.cam, 120.0, 90000.0, 100.0))
         lat_c, lon_c, z_c = self.cam
         az = np.arange(round((az_hi - az_lo) / az_step) + 1) * az_step + az_lo
-        A, D = np.meshgrid(az, d, indexing='ij')
-        lat = lat_c + np.degrees(D * np.cos(np.radians(A)) / R_EARTH)
-        lon = lon_c + np.degrees(D * np.sin(np.radians(A)) / (R_EARTH * np.cos(np.radians(lat_c))))
-        zq = self.dem(lat, lon)
-        el = np.degrees(np.arctan2(zq - z_c - D ** 2 / (2 * R_EARTH), D))
-        el[~np.isfinite(el)] = -np.inf
-        sky = el.max(axis=1)
+        sky = np.empty(len(az))
+        for k in range(0, len(az), chunk):         # in pieces: a fine DEM samples many distances per azimuth
+            A, D = np.meshgrid(az[k:k + chunk], d, indexing='ij')
+            lat = lat_c + np.degrees(D * np.cos(np.radians(A)) / R_EARTH)
+            lon = lon_c + np.degrees(D * np.sin(np.radians(A)) / (R_EARTH * np.cos(np.radians(lat_c))))
+            zq = self.dem(lat, lon)
+            el = np.degrees(np.arctan2(zq - z_c - D ** 2 / (2 * R_EARTH), D))
+            el[~np.isfinite(el)] = -np.inf
+            sky[k:k + chunk] = el.max(axis=1)
         ok = np.isfinite(sky)
         return azel_rays(az[ok], sky[ok])
 
@@ -194,7 +257,8 @@ class CameraModel:
         lat_c, lon_c, z_c = self.cam
         coslat = np.cos(np.radians(lat_c))
         rays = self.pixel_rays(uv, q)
-        ds = np.arange(0, self.max_range_m + self.step_m / 2, self.step_m)
+        ds = sample_distances(self.dem, self.cam, self.step_m, self.max_range_m)
+        dstep = np.diff(ds)
         for k in range(0, n, batch):
             rr = rays[k:k + batch]
             east = rr[:, :1] * ds
@@ -211,7 +275,7 @@ class CameraModel:
             first = cross[j].argmax(axis=1)
             r0 = residual[j, first]
             r1 = residual[j, first + 1]
-            rng = ds[first] + r0 / (r0 - r1) * self.step_m
+            rng = ds[first] + r0 / (r0 - r1) * dstep[first]
             e = rr[j, 0] * rng
             nn = rr[j, 1] * rng
             lt = lat_c + np.degrees(nn / R_EARTH)
@@ -271,13 +335,30 @@ def lean_description(c):
     return float(np.hypot(c[4], c[5])), float(np.degrees(np.arctan2(c[4], c[5])) % 360)
 
 
-def pose_from_bar(bar, c):
+def pose_key(bar):
+    """'X,Y,Z' of a bar reading, the key of its position's offsets (see pose_from_bar)."""
+    return '%.2f,%.2f,%.1f' % (bar[0] + 0.0, bar[1] + 0.0, bar[2] + 0.0)
+
+
+def pose_from_bar(bar, c, offsets=None):
     """Pose [azimuth, tilt, roll, hfov] for bar = (X, Y, Z) and mount correction c (4 or 6 values).
 
+    offsets: optional {pose_key(bar): {'pan': deg, 'tilt': deg, 'roll': deg, 'scale': factor, ...}} (or
+    [pan, tilt]): the camera does not return exactly to the pan/tilt its bar reports, and a position's own offset
+    is added to its X and Y first (edgefit fits them). A position's roll (deg, about the optical axis) and scale
+    (image magnification, > 1 zooms in) come from a manual adjustment in the calibration step; both are optional.
     Zoom is treated as optical magnification, tan(hfov/2) = tan(hfov_Z1/2) / Z
     (an assumption; not yet checked against zoomed stills).
     """
     X, Y, Z = bar
+    o = offsets.get(pose_key(bar)) if offsets else None
+    roll, scale = 0.0, 1.0
+    if o:
+        if isinstance(o, dict):
+            X, Y = X + (o.get('pan') or 0.0), Y + (o.get('tilt') or 0.0)
+            roll, scale = o.get('roll') or 0.0, o.get('scale') or 1.0
+        else:
+            X, Y = X + o[0], Y + o[1]
     c = full_correction(c)
     hfov = 2 * np.degrees(np.arctan(np.tan(np.radians(c[3] / 2)) / Z))
     q = np.array([np.mod(X + c[0], 360), Y + c[1], c[2], hfov])
@@ -286,6 +367,16 @@ def pose_from_bar(bar, c):
         m = _lean_matrix(c[4], c[5])
         q[:3] = _axes_to_angles(m @ forward, m @ right)
         q[0] %= 360
+    return turn_pose(q, roll, scale)
+
+
+def turn_pose(q, roll=0.0, scale=1.0):
+    """Pose q with its image rotated by roll (deg, about the optical axis) and magnified by scale."""
+    if not roll and scale == 1.0:
+        return q
+    q = np.array(q, float)
+    q[2] += roll
+    q[3] = 2 * np.degrees(np.arctan(np.tan(np.radians(q[3] / 2)) / scale))
     return q
 
 
@@ -332,7 +423,7 @@ def huber_score(q, model, sky_rays, gcp=None, sky_obs=None, n_landmarks=0):
     return score
 
 
-def objective(c, model, sky_rays, gcp_groups, sky, lim, c_ref):
+def objective(c, model, sky_rays, gcp_groups, sky, lim, c_ref, offsets=None):
     """Score of mount correction c (6 values; lim is 6 x (min, max)).
 
     gcp_groups: list of (bar, gcp rows [u, v, lat, lon, elev]) per frame.
@@ -342,13 +433,13 @@ def objective(c, model, sky_rays, gcp_groups, sky, lim, c_ref):
     if np.any(c < lim[:, 0] - 1e-8) or np.any(c > lim[:, 1] + 1e-8):
         return 1e9 + np.sum((c - c_ref) ** 2)
     n = sum(len(g) for _, g in gcp_groups)
-    score = sum(huber_score(pose_from_bar(bar, c), model, sky_rays, gcp=g) for bar, g in gcp_groups)
+    score = sum(huber_score(pose_from_bar(bar, c, offsets), model, sky_rays, gcp=g) for bar, g in gcp_groups)
     if sky is not None and len(sky[1]):
-        score += huber_score(pose_from_bar(sky[0], c), model, sky_rays, sky_obs=sky[1], n_landmarks=n)
+        score += huber_score(pose_from_bar(sky[0], c, offsets), model, sky_rays, sky_obs=sky[1], n_landmarks=n)
     return score
 
 
-def optimize_correction(c_start, model, sky_rays, gcp_groups, sky, lim, verbose=True, fit_lean=False):
+def optimize_correction(c_start, model, sky_rays, gcp_groups, sky, lim, verbose=True, fit_lean=False, offsets=None):
     """Fit the mount correction (Nelder-Mead with fminsearch's tolerances); returns all 6 values.
 
     Fits d_azimuth, d_tilt, roll and HFOV; the lean stays as in c_start unless
@@ -364,7 +455,7 @@ def optimize_correction(c_start, model, sky_rays, gcp_groups, sky, lim, verbose=
     def f(x):
         c = c_start.copy()
         c[free] = x
-        return objective(c, model, sky_rays, gcp_groups, sky, lim, c_start)
+        return objective(c, model, sky_rays, gcp_groups, sky, lim, c_start, offsets)
 
     x0 = c_start[free]
     simplex = np.vstack([x0] + [x0 + np.eye(len(free))[k] * s for k, s in enumerate(steps)])
@@ -556,7 +647,9 @@ def load_calibration(path):
     if corr in fields:
         lean = arr('mount_lean_east_north', 2)[0] if 'mount_lean_east_north' in fields else np.zeros(2)
         correction = np.concatenate([arr(corr, 4)[0], lean])
+    site = arr('camera_lat_lon_z', 3) if 'camera_lat_lon_z' in fields else np.zeros((0, 3))
     return {'p': arr('parameters_az_tilt_roll_hfov', 4)[0],
+            'site': site[0] if len(site) else None,
             'correction': correction,
             'landmark_stills': ([_mat_str(x) for x in np.asarray(c['landmark_stills']).ravel()]
                                 if 'landmark_stills' in fields else []),

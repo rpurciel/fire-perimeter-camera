@@ -20,22 +20,27 @@ header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; pad
 h1 { font-size: 16px; margin: 0; font-weight: 600; }
 h2 { font-size: 13px; margin: 0 0 8px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 /* Slider gets its own row so the labels (whose width changes per still) can't resize it mid-drag. */
-.still-nav { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 300px; }
+.timeline { flex: 1 1 100%; display: flex; flex-direction: column; gap: 4px; }   /* own rows under the buttons */
+.tl-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; font-size: 12px; color: var(--muted); }
+.tl-controls label { display: flex; align-items: center; gap: 4px; }
+.tl-controls input { font-size: 12px; padding: 2px 6px; }
+#tlStart, #tlEnd { width: 165px; }
+.tl-controls button.small { margin: 0; }
+.lanes { display: block; width: calc(100% - 14px); margin: 0 7px; height: 12px; cursor: pointer; }
+.cams span { margin-right: 14px; }
+.cams span.cur { font-weight: 700; }
+.cams span.early { opacity: .6; }
 .still-track { display: flex; align-items: center; gap: 8px; }
 .still-info { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; font-size: 12px; }
-/* Slider with a fixed 14 px thumb, so the edge marks below can be placed exactly under its positions:
-   the thumb centre runs from 7 px to width - 7 px, and .edge-marks is inset by the same 7 px. */
+/* Slider with a fixed 14 px thumb, so the lanes below can be placed exactly under its positions:
+   the thumb centre runs from 7 px to width - 7 px, and the lanes (.lanes) are inset by the same 7 px. */
 .slider-wrap { flex: 1; min-width: 120px; display: flex; flex-direction: column; gap: 3px; }
-#stillSlider { -webkit-appearance: none; appearance: none; width: 100%; height: 16px; margin: 0; padding: 0; border: none;
+#tlSlider { -webkit-appearance: none; appearance: none; width: 100%; height: 16px; margin: 0; padding: 0; border: none;
   background: transparent; cursor: pointer; }
-#stillSlider::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: var(--line); }
-#stillSlider::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5px; border: none; border-radius: 50%; background: var(--accent); }
-#stillSlider::-moz-range-track { height: 4px; border-radius: 2px; background: var(--line); }
-#stillSlider::-moz-range-thumb { width: 14px; height: 14px; border: none; border-radius: 50%; background: var(--accent); }
-.edge-marks { position: relative; height: 6px; margin: 0 7px; border-radius: 3px; background: var(--btn); }
-.edge-marks span { position: absolute; top: 0; bottom: 0; min-width: 3px; transform: translateX(-50%); border-radius: 1px;
-  background: #ff2bd6; cursor: pointer; }
-.edge-marks span.current { box-shadow: 0 0 0 1.5px var(--text); }
+#tlSlider::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: var(--line); }
+#tlSlider::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5px; border: none; border-radius: 50%; background: var(--accent); }
+#tlSlider::-moz-range-track { height: 4px; border-radius: 2px; background: var(--line); }
+#tlSlider::-moz-range-thumb { width: 14px; height: 14px; border: none; border-radius: 50%; background: var(--accent); }
 .warn { background: var(--warn-bg); color: var(--warn); padding: 2px 8px; border-radius: 4px; font-size: 12px; }
 .warn.off { visibility: hidden; }   /* keep its space so the page below doesn't jump */
 main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 12px; padding: 12px 16px; }
@@ -89,3 +94,89 @@ label.check input { margin: 2px 0 0; }
 .log { list-style: none; margin: 0; padding: 0; max-height: 160px; overflow: auto; }
 .log li { padding: 2px 0; border-top: 1px solid var(--line); white-space: pre-wrap; }
 .log li.err { color: var(--err); }
+
+/* ---- workspace header: spaces, camera tabs, save ---- */
+.ws-head { display: flex; align-items: center; gap: 10px; }
+.ws-head a { text-decoration: none; }
+.dirty { color: var(--warn); font-size: 12px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.seg button { border: none; border-radius: 0; border-right: 1px solid var(--line); background: var(--btn); }
+.seg button:last-child { border-right: none; }
+.seg button.on { background: var(--accent); color: var(--accent-text); }
+.seg button.cam-tab { border-left: 4px solid var(--cam, var(--line)); }
+.seg button.cam-tab.on { background: var(--panel); color: var(--text); font-weight: 600; box-shadow: inset 0 -2px 0 var(--cam); }
+body[data-space="analysis"] .cal-only, body[data-space="calibration"] .ana-only { display: none; }
+input.tiny { width: 56px; padding: 1px 4px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin-bottom: 6px; }
+.grid2 label, .card > label:not(.check) { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.grid2 label { min-width: 0; }
+.grid2 input, .card > label:not(.check) > input { color: var(--text); width: 100%; min-width: 0; }
+.grid2 .inline input { width: auto; }
+#cIndex { white-space: pre-wrap; margin: 8px 0 0; }
+.pano-report { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 6px; }
+.pano-report p { margin: 2px 0; }
+.pano-report table { margin: 4px 0; table-layout: fixed; }
+.pano-report table th:first-child { width: 46%; overflow-wrap: anywhere; }
+img.overlay { width: 100%; display: block; margin: 6px 0; border-radius: 4px; border: 1px solid var(--line); }
+
+/* ---- portal ---- */
+.portal-main { display: flex; flex-direction: column; gap: 12px; max-width: 980px; margin: 0 auto; }
+.portal-main > section { display: flex; flex-direction: column; gap: 12px; }
+.row-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.row-head h2 { margin: 0; }
+.inline { display: flex; gap: 6px; }
+.inline input { flex: 1; min-width: 0; }
+.ws-list li, .cam-list li { padding: 8px 0; font-size: 13px; }
+.ws-list li > span:first-child { font-weight: 600; flex: 0 0 auto; }
+.ws-list li > span.muted { flex: 1; }
+.cam-list li.cam { align-items: flex-start; }
+.cam-list li.cam > div { display: flex; flex-direction: column; gap: 2px; }
+.load-row { margin-top: 10px; align-items: center; }
+.button-link { padding: 5px 10px; border-radius: 4px; background: var(--accent); color: var(--accent-text); text-decoration: none; }
+.browser { border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; margin-bottom: 8px; max-height: 260px; overflow: auto; }
+.job { margin-top: 10px; }
+.job .bar { height: 6px; background: var(--btn); border-radius: 3px; overflow: hidden; margin: 4px 0; }
+.job .bar span { display: block; height: 100%; background: var(--accent); }
+.job.error .bar span { background: var(--err); }
+.joblog { margin: 0; white-space: pre-wrap; color: var(--muted); max-height: 120px; overflow: auto; }
+.pmap { height: 320px; border-radius: 6px; }
+@media (max-width: 640px) { .grid2 { grid-template-columns: 1fr; } }
+
+/* ---- calibration step ---- */
+.strip { display: flex; gap: 6px; overflow-x: auto; padding: 6px 0 10px; }
+.strip .thumb { flex: 0 0 auto; width: 168px; padding: 3px; display: flex; flex-direction: column; gap: 3px; font-size: 11px; text-align: left; }
+.strip .thumb img { width: 100%; height: 88px; object-fit: cover; border-radius: 3px; background: #000; }
+.strip .thumb.on { outline: 2px solid var(--accent); }
+.strip .thumb span { line-height: 1.25; }
+#lmForm { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+#lmForm label { display: grid; grid-template-columns: 72px 1fr; align-items: center; gap: 6px; margin-bottom: 4px; font-size: 12px; color: var(--muted); }
+#lmForm p { margin: 0 0 6px; }
+h2.sub { margin-top: 12px; }
+#result table { margin: 6px 0; }
+.adj-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 0; }
+.adj-row.nudges button { min-width: 30px; padding-left: 6px; padding-right: 6px; }
+.adj-row.nudges span:not(:first-child) { margin-left: 6px; }
+table.pose input { width: 76px; text-align: right; font: inherit; padding: 1px 3px; }
+#propStatus b.pending { color: var(--warn, #d97706); }
+canvas.adj-move { cursor: move; } canvas.adj-rotate { cursor: grab; } canvas.adj-stretch { cursor: ew-resize; }
+table.pose th.sub { color: var(--text); font-weight: 600; padding-top: 6px; text-align: left; }
+.warn-text { color: var(--warn); }
+/* calibration step: the side panel scrolls on its own, so the image stays in view while adjusting */
+@media (min-width: 901px) {
+  body.setup aside { position: sticky; top: 8px; align-self: start; max-height: calc(100vh - 16px); overflow-y: auto; padding-right: 2px; }
+}
+/* portal: site check, DEM card */
+.site-panel:empty { display: none; }
+.site-panel { margin-top: 6px; border-top: 1px dashed var(--line); padding-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.site-panel p { margin: 2px 0; }
+.site-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; }
+.site-row .mono { flex: 0 0 auto; }
+.site-panel .adj-row input { width: auto; }
+.cam-list li.cam .btns { align-items: center; margin-top: 2px; }
+#demCard .adj-row { margin-bottom: 4px; }
+#demRadius { width: 56px; }
+/* calibration step: landmark candidates from the reference points */
+#candList { max-height: 260px; overflow-y: auto; }
+#candList li .go { flex: 1; }
+#candList li.sky .go { font-weight: 600; }
+.cand-src { font-size: 10px; padding: 0 4px; border-radius: 3px; background: var(--btn); color: var(--muted); }

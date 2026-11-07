@@ -36,6 +36,10 @@ LOSS_SCALE = 0.1        # deg; residuals beyond this count less (soft L1)
 REJECT_DEG = 0.3        # after the first fit, points further than max(this, 4 robust sigma) are dropped
 MAX_RESID_DEG = 10.0    # residual used where the DEM skyline does not cover a detected point
 LEAN_MIN_SPREAD = 45.0  # deg of pan the frames must span for the lean to be fitted (lean='auto')
+# The bar's pan X is the azimuth from north (-180..180), true to a few degrees, so the azimuth offset is only
+# searched this far (a wider search lets a short or hazy skyline match some other stretch of horizon).
+AZ_RANGE = 10.0
+POOR_FIT_PX = 8.0       # median skyline error (px) above which the fit is reported as poor; good fits are 2-4 px
 
 
 @dataclass
@@ -89,22 +93,41 @@ def split_frames(img, n_frames=None, frame_width=None, aspect=16 / 9):
 
 def load_frames(paths, n_frames=None, frame_width=None, bar_px=None, glyphs=DEFAULT_GLYPHS, bars=None):
     """Frames of all images, with their bar readings. bars: optional list of (X, Y, Z), one per frame,
-    used instead of reading the bars (for bars the glyph reader cannot read)."""
-    from camstills.bar import Glyphs, default_bar_px, read_bar
-    g = Glyphs.load(glyphs) if bars is None else None
+    used instead of reading the bars (for bars the glyph reader cannot read).
+
+    glyphs: a glyph file, or 'auto' for the stored bar font that reads these frames best. The bar is read in
+    the bottom 1/30 of each frame (or bar_px) and, without bar_px, the frame is cropped above its black bar
+    (shorter than that strip on ALERTWildfire frames), as the stills are. Where the black bar starts is the
+    most common clear reading over the frames of one size (bar_geometry): on one frame alone, a dark scene
+    above the bar can look like part of it."""
+    from camstills.bar import Glyphs, bar_geometry, default_bar_px, pick_glyphs, read_bar
+    parts = [(path, k, part) for path in paths
+             for k, part in enumerate(split_frames(np.asarray(Image.open(path).convert('RGB')), n_frames,
+                                                   frame_width))]
+    grays = [np.asarray(Image.fromarray(part).convert('L')) for _, _, part in parts]
+    geometry = {h: bar_geometry([gr for gr in grays if gr.shape[0] == h], bar_px) for h in {gr.shape[0] for gr in grays}}
+    g = None
+    if bars is None and glyphs == 'auto':                # picked on the frames of the most common size
+        heights = [gr.shape[0] for gr in grays]
+        h = max(set(heights), key=heights.count)
+        _, g = pick_glyphs([gr for gr in grays if gr.shape[0] == h], bar_px, top=geometry[h][0])
+        if g is None:
+            raise ValueError("None of the stored bar fonts (camstills/glyphs) reads the frames' info bars.")
+    elif bars is None:
+        g = Glyphs.load(glyphs)
     frames = []
-    for path in paths:
-        img = np.asarray(Image.open(path).convert('RGB'))
-        for k, part in enumerate(split_frames(img, n_frames, frame_width)):
-            nb = bar_px or default_bar_px(part.shape[0])
-            fr = Frame(source=path, index=k, rgb=np.ascontiguousarray(part[:-nb]), full=part)
-            if bars is None:
-                r = read_bar(np.asarray(Image.fromarray(part).convert('L')), g, nb)
-                if r.X is not None and r.Y is not None and r.Z is not None:
-                    fr.bar, fr.time, fr.elev_ft = (r.X, r.Y, r.Z), r.timestamp, r.elev_ft
-                else:
-                    fr.note = 'info bar not readable (%s)' % '; '.join(r.problems)
-            frames.append(fr)
+    for (path, k, part), gr in zip(parts, grays):
+        nb = bar_px or default_bar_px(part.shape[0])
+        top, height = geometry[gr.shape[0]]
+        crop = bar_px or height
+        fr = Frame(source=path, index=k, rgb=np.ascontiguousarray(part[:-crop]), full=part)
+        if bars is None:
+            r = read_bar(gr, g, nb, top)
+            if r.X is not None and r.Y is not None and r.Z is not None:
+                fr.bar, fr.time, fr.elev_ft = (r.X, r.Y, r.Z), r.timestamp, r.elev_ft
+            else:
+                fr.note = 'info bar not readable (%s)' % '; '.join(r.problems)
+        frames.append(fr)
     if bars is not None:
         if len(bars) != len(frames):
             raise ValueError('%d bar readings given for %d frames' % (len(bars), len(frames)))
@@ -245,15 +268,17 @@ def _pan_spread(frames):
     return 360 - gaps.max()
 
 
-def calibrate(frames, cam, tiles, hfov0=60.0, lean='auto', az_range=180.0, az_step=0.05, verbose=True):
+def calibrate(frames, cam, tiles, hfov0=60.0, lean='auto', az_range=AZ_RANGE, az_step=0.05, verbose=True, log=print,
+              dem=None):
     """Fit the mount correction to the frames' detected skylines.
 
     lean: 'auto' fits the pan-axis lean when usable frames' pans span >= LEAN_MIN_SPREAD
     deg (each frame's tilt and roll then constrain it); 'fit' always; 'off' never (lean = 0).
-    az_range: the azimuth offset (pan zero vs true north) is searched within +-az_range deg.
+    az_range: the azimuth offset (pan zero vs true north) is searched within +-az_range deg (180: anywhere).
+    dem: a core.DEM of the tiles already in memory (else it is read from tiles).
     Returns (correction (6 values), report dict). Frames' keep/stats are filled in.
     """
-    say = print if verbose else (lambda *a: None)
+    say = log if verbose else (lambda *a: None)
     use = [fr for fr in frames if not fr.note]
     for fr in frames:
         say('  %-34s %s' % (fr.name, ('X %+8.2f Y %+6.2f Z %4.1f  %4d skyline points'
@@ -261,7 +286,7 @@ def calibrate(frames, cam, tiles, hfov0=60.0, lean='auto', az_range=180.0, az_st
     if not use:
         raise ValueError('No frame has a readable bar and a clear skyline.')
     say('Computing the DEM skyline...')
-    dem = core.DEM(list(tiles))
+    dem = dem if dem is not None else core.DEM(list(tiles))
     any_model = core.CameraModel(cam, dem, use[0].nx, use[0].ny)
     fit = _Fitter(use, cam, dem, any_model.horizon_rays(0, 360, az_step), hfov0)
     for fr in use:
@@ -300,7 +325,7 @@ def calibrate(frames, cam, tiles, hfov0=60.0, lean='auto', az_range=180.0, az_st
     mag, toward = core.lean_description(c)
     report = {'frames_used': len(use), 'pan_spread_deg': spread, 'lean_fitted': fit_lean, 'ambiguous': ambiguous,
               'lean_deg': mag, 'lean_toward_az_deg': toward, 'cost': float(res.cost),
-              'models': fit.models, 'sky_rays': fit.sky_rays}
+              'models': fit.models, 'sky_rays': fit.sky_rays, 'fit_residual': fit.residual, 'px_per_deg': fit.px_per_deg}
     say('Correction: d_azimuth %+.3f  d_tilt %+.3f  roll %+.3f  HFOV(Z1) %.3f  lean east %+.3f  north %+.3f'
         % tuple(c))
     if fit_lean:
@@ -308,10 +333,19 @@ def calibrate(frames, cam, tiles, hfov0=60.0, lean='auto', az_range=180.0, az_st
     if ambiguous:
         say('WARNING: an azimuth offset of %+.1f deg fits almost as well (median error %.3f vs %.3f deg). Check the '
             'overlay; more frames or a smaller --az-range settle it.' % (rival[1][0], rival[0], best))
+    if az_range < 180 and abs(c[0]) > 0.9 * az_range:
+        say('WARNING: the azimuth offset (%+.1f deg) is at the edge of the +-%g deg search. The bar X should be '
+            'true north to a few degrees: check the camera site and the overlay.' % (c[0], az_range))
     for fr in use:
         s = fr.stats
         say('  %-34s median |error| %5.2f px   90%% %6.2f px   median %+6.2f px   %3.0f%% of points used'
             % (fr.name, s['median_abs_px'], s['p90_abs_px'], s['median_px'], 100 * s['kept']))
+    overall = float(np.median(np.concatenate([np.abs(fit.residual(c, fr)[fr.keep]) * fit.px_per_deg(fr) for fr in use])))
+    report['median_abs_px'] = overall
+    if overall > POOR_FIT_PX:
+        say('WARNING: the DEM skyline fits poorly (median error %.1f px; good fits are 2-4 px). Common causes: the '
+            'camera site is off by some hundred metres (nearby terrain is then wrong), haze or smoke hides the '
+            'skyline, or DEM tiles are missing. Check the overlay.' % overall)
     return c, report
 
 
@@ -366,26 +400,47 @@ def save(path, frames, c, report, cam):
 
 
 def run(paths, cam, tiles, out_dir, camera, hfov0=60.0, lean='auto', n_frames=None, frame_width=None,
-        bar_px=None, glyphs=DEFAULT_GLYPHS, bars=None, az_range=180.0, verbose=True):
-    """Whole pipeline; returns (correction, mat path, overlay path). cam may give lat, lon only:
-    the elevation is then taken from the frames' info bars."""
+        bar_px=None, glyphs=DEFAULT_GLYPHS, bars=None, az_range=AZ_RANGE, verbose=True, log=print, frames_out=None,
+        method='edges', dem=None):
+    """Whole pipeline; returns (correction, mat path, overlay path). dem: the DEM to use (e.g. a
+    core.LayeredDEM already in memory); default the SRTM mosaic of tiles. cam may give lat, lon only:
+    the elevation is then taken from the frames' info bars. log receives the progress lines; if
+    frames_out is a list, the frames (with their bars, notes and error statistics) are appended to it.
+
+    method 'edges' (default): the skyline fit below is the starting point, then edgefit puts the DEM skyline on
+    the frames' silhouette edges (the detected skyline sits a little high, and the skyline fit only measures
+    vertical errors). 'skyline': the skyline fit alone."""
     frames = load_frames(paths, n_frames, frame_width, bar_px, glyphs, bars)
+    if frames_out is not None:
+        frames_out.extend(frames)
     if len(cam) == 2:
         el = [fr.elev_ft for fr in frames if fr.elev_ft]
         if not el:
             raise ValueError('No camera elevation given and none on the info bars.')
         cam = (cam[0], cam[1], float(np.median(el)) * 0.3048)
         if verbose:
-            print('Camera elevation from the info bar: %.1f m' % cam[2])
+            log('Camera elevation from the info bar: %.1f m' % cam[2])
     detect(frames)
-    c, report = calibrate(frames, cam, tiles, hfov0, lean, az_range, verbose=verbose)
+    dem = dem if dem is not None else core.DEM(list(tiles))
+    c, report = calibrate(frames, cam, tiles, hfov0, lean, az_range, verbose=verbose, log=log, dem=dem)
+    if method == 'edges':
+        from . import edgefit
+        use = [fr for fr in frames if not fr.note]
+        efr = [edgefit.EdgeFrame.from_rgb('pano:' + fr.name, fr.name, fr.rgb, fr.bar, 'panorama', fr.note)
+               for fr in frames if fr.bar]
+        free = range(6) if report['lean_fitted'] else range(4)
+        c, _, _ = edgefit.EdgeFit(efr, cam, dem).run(c, free, log=log if verbose else (lambda *a: None))
+        for fr in use:                             # the overlay's error statistics, for the new correction
+            r = report['fit_residual'](c, fr) * report['px_per_deg'](fr)
+            k = fr.keep
+            fr.stats.update(median_abs_px=float(np.median(np.abs(r[k]))), median_px=float(np.median(r[k])))
     os.makedirs(out_dir, exist_ok=True)
     mat = os.path.join(out_dir, '%s_panorama.mat' % camera)
     img = os.path.join(out_dir, '%s_panorama_overlay.jpg' % camera)
     save(mat, frames, c, report, cam)
     overlay(frames, c, report, img)
     if verbose:
-        print('Wrote %s\n      %s' % (mat, img))
+        log('Wrote %s\n      %s' % (mat, img))
     return c, mat, img
 
 
@@ -399,13 +454,18 @@ def main(argv=None):
     ap.add_argument('--hfov', type=float, default=60.0, help='starting horizontal field of view at Z1 (default 60)')
     ap.add_argument('--lean', choices=('auto', 'fit', 'off'), default='auto',
                     help='fit the pan-axis lean: auto = when the frames span >= %g deg of pan (default)' % LEAN_MIN_SPREAD)
-    ap.add_argument('--az-range', type=float, default=180.0,
-                    help='search the pan-zero offset from north within +-this many degrees (default 180: anywhere)')
+    ap.add_argument('--az-range', type=float, default=AZ_RANGE,
+                    help='search the pan-zero offset from north within +-this many degrees (default %(default)g: the '
+                         "bar's X is north-referenced to a few degrees; 180 searches all directions)")
+    ap.add_argument('--method', choices=('edges', 'skyline'), default='edges',
+                    help="'edges' (default): put the DEM skyline on the frames' silhouette edges, starting from the "
+                         "skyline fit; 'skyline': the fit to the detected skyline alone (it sits a little high)")
     ap.add_argument('--out-dir', default='output')
     ap.add_argument('--frames', type=int, help='frames per image (default: from a 16:9 frame shape)')
     ap.add_argument('--frame-width', type=float, help='frame width in pixels (instead of --frames)')
     ap.add_argument('--bar-px', type=int, help='info bar height in pixels (default 1/30 of the frame height)')
-    ap.add_argument('--glyphs', default=DEFAULT_GLYPHS, help='bar font glyphs (camstills); default ALERTCalifornia')
+    ap.add_argument('--glyphs', default='auto',
+                    help="bar font glyphs (camstills/glyphs/*.npz), or 'auto' (default): the font that reads the bars")
     ap.add_argument('--bars', help='X,Y,Z for each frame in order, separated by ";", instead of reading the bars; '
                     'write it as --bars="..." when it starts with a minus sign')
     a = ap.parse_args(argv)
@@ -414,7 +474,7 @@ def main(argv=None):
     bars = [tuple(map(float, b.split(','))) for b in a.bars.split(';')] if a.bars else None
     np.seterr(all='ignore')
     run(a.images, tuple(a.cam), a.tiles, a.out_dir, a.camera, a.hfov, a.lean, a.frames, a.frame_width,
-        a.bar_px, a.glyphs, bars, a.az_range)
+        a.bar_px, a.glyphs, bars, a.az_range, method=a.method)
 
 
 if __name__ == '__main__':

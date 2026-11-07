@@ -7,3 +7,5 @@ dependencies:
   - scipy
   - pillow
   - imageio-ffmpeg   # reads recordings (camstills); brings ffmpeg
+  - tifffile         # reads the USGS 3DEP elevation (GeoTIFF; camreg/dem3dep.py)
+  - imagecodecs      # ...and its compression

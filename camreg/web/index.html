@@ -3,24 +3,42 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Camera Registration</title>
+<title>Fire Camera Workspace</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body data-space="calibration">
 <header>
-  <h1 id="title">Camera registration and fire-edge mapping</h1>
-  <div class="still-nav">
+  <div class="ws-head">
+    <a href="/" class="muted small" title="Back to the portal (workspaces, cameras)">◀ Portal</a>
+    <h1 id="title">Workspace</h1>
+    <span id="dirty" class="dirty" hidden title="Unsaved changes">● unsaved</span>
+    <button id="saveWs" title="Save the workspace (Ctrl/⌘+S)">Save workspace</button>
+  </div>
+  <div class="seg" id="spaces" role="tablist">
+    <button data-space-btn="calibration" title="Check or fix each camera's calibration">Calibration</button>
+    <button data-space-btn="analysis" title="Draw fire edges and export the perimeter">Analysis</button>
+  </div>
+  <div class="seg" id="camTabs" role="tablist" title="Camera (keys 1–9)"></div>
+  <div class="timeline">
+    <div class="tl-controls">
+      <label>Start <input id="tlStart" class="mono" placeholder="YYYY-MM-DD HH:MM:SS" title="Camera clock (the time on the info bars)"></label>
+      <label>End <input id="tlEnd" class="mono" placeholder="YYYY-MM-DD HH:MM:SS"></label>
+      <label>Bin <input id="tlBin" class="tiny" inputmode="decimal" placeholder="each" title="Step the timeline in windows of this many minutes; blank: from still to still"> min</label>
+      <button id="tlAll" class="small" title="Start and End at the first and last still of all cameras">All stills</button>
+      <span class="muted small">← → step · Shift+← → the active camera's stills · each camera shows its latest still at the selected time</span>
+    </div>
     <div class="still-track">
-      <button id="prev" title="Previous still (←)">◀</button>
+      <button id="prev" title="Back one bin, or to the previous still of any camera (←)">◀</button>
       <div class="slider-wrap">
-        <input id="stillSlider" type="range" min="0" max="0" value="0" aria-label="Still">
-        <div id="edgeMarks" class="edge-marks" title="Stills with fire edges drawn (click a mark to go there)"></div>
+        <input id="tlSlider" type="range" min="0" max="1" value="0" step="any" aria-label="Time">
+        <canvas id="tlLanes" class="lanes" title="Stills of each camera; tall marks: fire edges drawn (click to go there)"></canvas>
       </div>
-      <button id="next" title="Next still (→)">▶</button>
+      <button id="next" title="Forward one bin, or to the next still of any camera (→)">▶</button>
     </div>
     <div class="still-info">
       <span id="stillTime" class="mono"></span>
+      <span id="otherTime" class="mono cams"></span>
       <span id="stillBar" class="mono muted"></span>
       <span id="stillWarn" class="warn off"></span>
     </div>
@@ -37,7 +55,7 @@
         <button id="fit" title="Fit image (F)">Fit</button>
       </div>
     </div>
-    <p class="hint">Scroll to zoom · drag to pan (right-drag or Space+drag while a tool is active) · Esc cancels · Enter or double-click finishes a line · Backspace removes the last vertex · Ctrl/⌘+Z or Undo undoes</p>
+    <p class="hint">Scroll to zoom · drag to pan (right-drag or Space+drag while a tool is active) · Esc cancels · Enter or double-click finishes a line · Backspace removes the last vertex · Ctrl/⌘+Z or Undo undoes · 1–9 switch camera</p>
     <div id="mapWrap">
       <div id="map"></div>
       <p class="hint">Map: click to see where a point falls in the photo (cyan +). While adding a landmark, a map click fills its lat/lon/elevation from the DEM.</p>
@@ -45,8 +63,9 @@
   </section>
 
   <aside>
-    <div class="card">
-      <h2>Fire edges</h2>
+    <!-- ======================= analysis space ======================= -->
+    <div class="card ana-only">
+      <h2>Fire edges · <span class="camname"></span></h2>
       <div class="btns">
         <button data-act="clickTerrain">Click terrain</button>
         <button data-act="freehandEdge">Freehand edge</button>
@@ -56,15 +75,53 @@
       </div>
       <div id="terrainOut" class="mono small" hidden></div>
       <ul id="edgeList" class="list"></ul>
-      <div class="row export"><input id="exportName" aria-label="Export base name"><button data-act="exportEdges">Export CSV + KML</button></div>
-      <label class="check small"><input type="checkbox" id="timeStamps" checked> Time-stamp each line in the KML (Google Earth time slider)</label>
     </div>
 
-    <div class="card">
-      <pre id="status" class="mono"></pre>
+    <div class="card ana-only">
+      <h2>Combined perimeter</h2>
+      <p id="comboLine" class="small"></p>
+      <p id="overlapLine" class="small muted"></p>
+      <div class="btns">
+        <button data-act="setCentre" title="Click the map to set the centre used to split the perimeter by bearing">Set fire centre on map</button>
+        <button data-act="autoCentre">Auto centre</button>
+      </div>
+      <label class="check small">Ignore lines older than <input id="maxAge" class="tiny" inputmode="decimal" placeholder="—"> min (blank: no limit)</label>
+      <p class="muted small">Each camera's latest line at the current time; where cameras see the same part of the fire, the newest line is used. The map shows the observed parts only.</p>
     </div>
 
-    <div class="card">
+    <div class="card ana-only">
+      <h2>Export</h2>
+      <div class="row export"><input id="exportName" aria-label="Export base name"><button data-act="exportAll" class="primary">Export CSV + KML</button></div>
+      <label class="check small"><input type="checkbox" id="closeRing"> Close the combined perimeter across unseen parts (straight connectors, flagged; gives an area)</label>
+      <label class="check small"><input type="checkbox" id="timeStamps" checked> Time-stamp the lines in the KML (Google Earth time slider)</label>
+      <p class="muted small">Writes each camera's lines and the combined perimeter to the workspace's exports/ folder.</p>
+    </div>
+
+    <!-- ===================== calibration space ====================== -->
+    <div class="card cal-only">
+      <h2>Camera · <span class="camname"></span></h2>
+      <div class="grid2">
+        <label>Name <input id="cName"></label>
+        <label>Height, m <input id="cElev" inputmode="decimal"></label>
+        <label>Latitude <input id="cLat" inputmode="decimal"></label>
+        <label>Longitude <input id="cLon" inputmode="decimal"></label>
+      </div>
+      <label>Stills folder <input id="cStills"></label>
+      <label title="The horizontal field of view at zoom 1, from the camera's datasheet (e.g. 65.1 for an Axis Q6075 at the wide end). The calibration starts from it; without a panorama it keeps it, since fire-day stills can't fix it.">Field of view at Z 1, ° (starting value) <input id="cHfov" inputmode="decimal"></label>
+      <div class="btns"><button id="cApply">Apply changes</button><button id="cReindex" title="Read the info bars of all stills in the folder again">Read bars again</button></div>
+      <p id="cIndex" class="muted small mono"></p>
+    </div>
+
+    <div class="card cal-only">
+      <h2>Calibration</h2>
+      <div class="btns"><a id="toSetup" class="button-link" href="/setup" title="Representative frames, landmarks, the edge-based calibration of each camera and its adjustment by hand">Landmarks, calibration &amp; adjustment →</a></div>
+      <div id="panoResult"></div>
+      <h2 class="sub">Panoramas</h2>
+      <ul id="panoList" class="list"></ul>
+      <label class="small">Add panorama <input type="file" id="panoAdd" accept="image/*" multiple></label>
+    </div>
+
+    <div class="card cal-only">
       <h2>Camera pose</h2>
       <table class="pose mono">
         <thead><tr><th></th><th>Az</th><th>Tilt</th><th>Roll</th><th>HFOV</th></tr></thead>
@@ -76,11 +133,11 @@
       </table>
       <p id="calibLine" class="small"></p>
       <p id="leanLine" class="mono small"></p>
-      <p class="muted small">The pose follows each frame's info bar (X pan, Y tilt, Z zoom). The mount correction is one fixed offset for this camera, fitted by <b>Optimize</b> from landmarks and the skyline, and applied to every frame. The pan-axis lean comes from a panorama calibration (<code>--panorama</code>) and stays fixed unless “also fit lean” is ticked. HFOV is the Z1 value scaled by 1/Z (assumed).</p>
+      <p class="muted small">The pose follows each frame's info bar (X pan, Y tilt, Z zoom). The mount correction is one fixed offset for this camera, from the panorama calibration or fitted by <b>Optimize</b> from landmarks and the skyline, and applied to every frame. HFOV is the Z1 value scaled by 1/Z (assumed).</p>
       <button id="resetCorr" class="small">Reset correction (raw bar values)</button>
     </div>
 
-    <div class="card">
+    <div class="card cal-only">
       <h2>Registration</h2>
       <div class="btns">
         <button data-act="addGCP">Add landmark</button>
@@ -102,10 +159,16 @@
       <ul id="gcpList" class="list"></ul>
     </div>
 
+    <div class="card cal-only">
+      <h2>Calibration files</h2>
+      <div class="row"><select id="importName" aria-label="Calibration to import"></select><button data-act="importMat">Import .mat</button></div>
+      <div class="row"><input id="exportMatName" aria-label="Calibration file name"><button data-act="exportMat">Export .mat</button></div>
+      <p class="muted small">Import takes a saved calibration of this camera (same site) from the workspace or the project's output/ folder: its correction, landmarks, skyline trace and edges. Export writes the MATLAB layout to exports/.</p>
+    </div>
+
+    <!-- ========================= both spaces ======================== -->
     <div class="card">
-      <h2>Files <span id="outDir" class="muted small"></span></h2>
-      <div class="row"><input id="calibName" aria-label="Calibration file"><button data-act="saveFit">Save calibration</button></div>
-      <div class="row"><select id="loadName" aria-label="Calibration to load"></select><button data-act="loadFit">Load calibration</button></div>
+      <pre id="status" class="mono"></pre>
     </div>
 
     <div class="card">
@@ -116,6 +179,7 @@
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="/static/common.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

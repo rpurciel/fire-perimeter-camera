@@ -3,8 +3,9 @@
     python -m camstills.extract recording.mp4 --camera verdi --out stills/verdi
     python -m camstills.extract --manifest recordings.csv          # columns: video, camera[, out]
 
-A time-lapse recording shows each camera image for one or more video frames. Where the black bar starts is
-found on a dozen frames spread over the recording; then every frame's info bar is read (bar.py). Consecutive
+A time-lapse recording shows each camera image for one or more video frames. Where the black bar starts, and
+which stored bar font reads it (camstills/glyphs: one per camera network and frame size), are found on a dozen
+frames spread over the recording; then every frame's info bar is read (bar.py). Consecutive
 frames with the same bar timestamp are one still, saved once as
 <camera>_<YYYYMMDD>_<HHMMSS>_<hundredths>.png (full frame, bar included). A frame whose bar can't be read is
 saved under review/ for a person; it is never guessed.
@@ -19,6 +20,10 @@ Writes to the output folder:
 
 To fix a frame, copy its row from review.csv into an overrides CSV, fill in timestamp, pan_X_deg, tilt_Y_deg
 and zoom_Z, and run again with --overrides. Running again rewrites the index files and images; it deletes nothing.
+
+If none of the first STOP_AFTER frames of a recording can be read (a bar font that isn't stored, a frame much
+smaller than 720p), the run stops with a message instead of filling review/ with every frame (--keep-going
+reads on regardless).
 """
 import argparse
 import csv
@@ -30,12 +35,16 @@ from collections import Counter
 import numpy as np
 from PIL import Image
 
-from .bar import REF_BAR_PX, Glyphs, bar_strip, common_top, default_bar_px, read_bar
-from .train import DEFAULT_GLYPHS
+from .bar import REF_BAR_PX, Glyphs, bar_strip, common_top, default_bar_px, glyph_sets, pick_glyphs, read_bar
 
 SAME_PICTURE = 1.0         # mean grey-level change (0-255) below which review.csv notes a likely repeat
+STOP_AFTER = 300           # stop if none of a recording's first this many frames has a readable bar
+PROGRESS_EVERY = 200       # frames between progress lines
 REVIEW_COLS = ['video', 'video_frame', 'image', 'reason', 'bar_text',
                'timestamp', 'pan_X_deg', 'tilt_Y_deg', 'zoom_Z']
+INDEX_COLS = ['file', 'timestamp', 'pan_X_deg', 'tilt_Y_deg', 'zoom_Z', 'pose_id', 'elev_ft', 'video',
+              'video_frame_first', 'video_frame_last', 'n_frames', 'out_of_order_in_video', 'read',
+              'frames_agree', 'glyph_score']
 
 
 def frames(path):
@@ -64,16 +73,34 @@ def sample_frames(path, n=12):
             yield np.frombuffer(buf, np.uint8).reshape(h, w, 3)
 
 
-def find_bar_top(video, bar_px=None):
-    """(bar top row in the rescaled bar strip, bar height in frame pixels) of a recording."""
-    strips = []
+def survey(video, bar_px=None):
+    """(bar top row in the rescaled bar strip, bar height in frame pixels, strip height in frame pixels, the
+    sampled frames' bottom strips as grey arrays) of a recording, from a dozen frames spread over it."""
+    bottoms, px = [], None
     for rgb in sample_frames(video):
         px = bar_px or default_bar_px(rgb.shape[0])
-        strips.append(bar_strip(gray(rgb[-px:]), px))
-    if not strips:
-        return 0, None
-    top = common_top(strips)
-    return top, round((REF_BAR_PX - top) * px / REF_BAR_PX)
+        bottoms.append(gray(rgb[-px:]))
+    if not bottoms:
+        return 0, None, px, []
+    top = common_top([bar_strip(g, px) for g in bottoms])
+    return top, round((REF_BAR_PX - top) * px / REF_BAR_PX), px, bottoms
+
+
+def find_bar_top(video, bar_px=None):
+    """(bar top row in the rescaled bar strip, bar height in frame pixels) of a recording."""
+    return survey(video, bar_px)[:2]
+
+
+def choose_glyphs(bottoms, px, top, log=print, name=''):
+    """The stored bar font that reads the sampled frames best (bar.pick_glyphs); ValueError if none reads any."""
+    path, g = pick_glyphs(bottoms, px, top=top)
+    if g is None:
+        raise ValueError(f"{name}: none of the stored bar fonts ({', '.join(os.path.basename(p) for p in glyph_sets())}) "
+                         f'reads the info bar of {len(bottoms)} sample frames. If this network or frame size is new, '
+                         'teach its font with camstills.train (see the README) and pass it with --glyphs.')
+    n = sum(read_bar(b, g, px, top).ok for b in bottoms)
+    log(f'  {name}: bar font {os.path.basename(path)} (reads {n} of {len(bottoms)} sample frames)')
+    return g
 
 
 def gray(rgb):
@@ -107,7 +134,30 @@ def load_overrides(path):
     return out
 
 
-def extract(videos, camera, out, glyphs, bar_px=None, overrides=None, log=print):
+def write_index_files(out, index_rows, poses, review):
+    """Write stills_index.csv (index_rows: lists in INDEX_COLS order, sorted by time), poses.csv (poses:
+    {(X, Y, Z): pose_id}) and review.csv (review: dicts with REVIEW_COLS keys) into the folder out."""
+    with open(os.path.join(out, 'stills_index.csv'), 'w', newline='') as fh:
+        w = csv.writer(fh)
+        w.writerow(INDEX_COLS)
+        for row in index_rows:
+            w.writerow(row)
+    with open(os.path.join(out, 'poses.csv'), 'w', newline='') as fh:
+        w = csv.writer(fh)
+        w.writerow(['pose_id', 'pan_X_deg', 'tilt_Y_deg', 'zoom_Z', 'n_stills', 'first_time', 'last_time'])
+        for pose, pid in poses.items():
+            ts = [row[1] for row in index_rows if row[5] == pid]
+            w.writerow([pid, *pose, len(ts), ts[0], ts[-1]])
+    with open(os.path.join(out, 'review.csv'), 'w', newline='') as fh:
+        w = csv.DictWriter(fh, REVIEW_COLS)
+        w.writeheader()
+        for r in review:
+            w.writerow({k: r.get(k, '') for k in REVIEW_COLS})
+
+
+def extract(videos, camera, out, glyphs='auto', bar_px=None, overrides=None, log=print, keep_going=False):
+    """glyphs: a Glyphs object, a glyph file, or 'auto' (the stored font that reads each recording's sample
+    frames best)."""
     overrides = overrides or {}
     os.makedirs(os.path.join(out, 'review'), exist_ok=True)
     stills = {}                 # timestamp -> still record
@@ -115,13 +165,26 @@ def extract(videos, camera, out, glyphs, bar_px=None, overrides=None, log=print)
     for video in videos:
         vname = os.path.basename(video)
         prev = None             # (still record or None, signature) of the previous frame
-        t0, n_read, n_frames = time.time(), 0, 0
-        top, height = find_bar_top(video, bar_px)
+        t0, n_read, n_frames, n_unread = time.time(), 0, 0, 0
+        top, height, spx, bottoms = survey(video, bar_px)
         if height:
             log(f'  {vname}: black bar is the bottom {height} px'
                 + (' (scene above it ignored)' if top else ''))
+        if isinstance(glyphs, Glyphs):
+            g = glyphs
+        elif glyphs == 'auto':
+            g = choose_glyphs(bottoms, spx, top, log, vname)
+        else:
+            g = Glyphs.load(glyphs)
         for i, rgb in frames(video):
             n_frames += 1
+            if n_frames % PROGRESS_EVERY == 0:
+                log(f'  {vname}: frame {n_frames}, {len(stills)} stills so far, {n_unread} frames unreadable '
+                    f'({time.time() - t0:.0f} s)')
+            if n_frames == STOP_AFTER and n_read == 0 and len(stills) == 0 and not keep_going:
+                raise ValueError(f'{vname}: none of the first {STOP_AFTER} frames has a readable info bar, so the run '
+                                 f'stops (their images are in {os.path.join(out, "review")}). Check the bar font '
+                                 '(--glyphs), or pass --keep-going to read the whole recording anyway.')
             px = bar_px or default_bar_px(rgb.shape[0])
             sig = signature(rgb, px)
             ov = overrides.get((vname, i)) or overrides.get(('', i))
@@ -129,7 +192,7 @@ def extract(videos, camera, out, glyphs, bar_px=None, overrides=None, log=print)
                 ts, X, Y, Z = ov
                 reading = dict(ts=ts, pose=(X, Y, Z), elev=None, score=0.0, how='override', text='')
             else:
-                r = read_bar(gray(rgb[-px:]), glyphs, px, top)
+                r = read_bar(gray(rgb[-px:]), g, px, top)
                 pose = (r.X, r.Y, r.Z) if None not in (r.X, r.Y, r.Z) else None
                 reading = dict(ts=r.timestamp or None, pose=pose, elev=r.elev_ft, score=r.score,
                                how='bar', text=r.text, problems=r.problems)
@@ -152,6 +215,7 @@ def extract(videos, camera, out, glyphs, bar_px=None, overrides=None, log=print)
                 review.append(dict(video=vname, video_frame=i, image=img, reason=reason,
                                    bar_text=reading['text']))
                 prev = (None, sig)
+                n_unread += 1
                 continue
             s['frames'].append((vname, i))
             if reading['pose']:
@@ -161,9 +225,8 @@ def extract(videos, camera, out, glyphs, bar_px=None, overrides=None, log=print)
             if reading['elev']:
                 s['elev'][reading['elev']] += 1
             prev = (s, sig)
-            if i % 200 == 0:
-                log(f'  {vname}: frame {i}, {len(stills)} stills so far ({time.time() - t0:.0f} s)')
-        log(f'  {vname}: done, bar read cleanly on {n_read} of {n_frames} frames')
+        log(f'  {vname}: done, bar read cleanly on {n_read} of {n_frames} frames ({n_unread} unreadable, '
+            f'{time.time() - t0:.0f} s)')
 
     # one pose per still: the reading most of its frames agree on
     rows = []
@@ -199,28 +262,14 @@ def extract(videos, camera, out, glyphs, bar_px=None, overrides=None, log=print)
     if stale:
         log(f'  note: {len(stale)} older images in {out} are not from this run (e.g. {stale[0]})')
 
-    with open(os.path.join(out, 'stills_index.csv'), 'w', newline='') as fh:
-        w = csv.writer(fh)
-        w.writerow(['file', 'timestamp', 'pan_X_deg', 'tilt_Y_deg', 'zoom_Z', 'pose_id', 'elev_ft', 'video',
-                    'video_frame_first', 'video_frame_last', 'n_frames', 'out_of_order_in_video', 'read',
-                    'frames_agree', 'glyph_score'])
-        for r in rows:
-            s = r['s']
-            elev = '%g' % s['elev'].most_common(1)[0][0] if s['elev'] else ''
-            w.writerow([s['file'], s['ts'], *r['pose'], r['pose_id'], elev, s['frames'][0][0],
-                        s['frames'][0][1], s['frames'][-1][1], len(s['frames']), r['ooo'],
-                        '+'.join(sorted(s['how'])), r['agree'], '%.4f' % s['score']])
-    with open(os.path.join(out, 'poses.csv'), 'w', newline='') as fh:
-        w = csv.writer(fh)
-        w.writerow(['pose_id', 'pan_X_deg', 'tilt_Y_deg', 'zoom_Z', 'n_stills', 'first_time', 'last_time'])
-        for pose, pid in poses.items():
-            ts = [r['s']['ts'] for r in rows if r['pose_id'] == pid]
-            w.writerow([pid, *pose, len(ts), ts[0], ts[-1]])
-    with open(os.path.join(out, 'review.csv'), 'w', newline='') as fh:
-        w = csv.DictWriter(fh, REVIEW_COLS)
-        w.writeheader()
-        for r in review:
-            w.writerow({k: r.get(k, '') for k in REVIEW_COLS})
+    index_rows = []
+    for r in rows:
+        s = r['s']
+        elev = '%g' % s['elev'].most_common(1)[0][0] if s['elev'] else ''
+        index_rows.append([s['file'], s['ts'], *r['pose'], r['pose_id'], elev, s['frames'][0][0],
+                           s['frames'][0][1], s['frames'][-1][1], len(s['frames']), r['ooo'],
+                           '+'.join(sorted(s['how'])), r['agree'], '%.4f' % s['score']])
+    write_index_files(out, index_rows, poses, review)
 
     label = Counter(s['text'].split(' elev')[0] for s in stills.values() if ' elev' in s['text'])
     log(f'{camera}: {len(rows)} stills, {len(poses)} poses, {len(review)} for review'
@@ -236,8 +285,12 @@ def main(argv=None):
     ap.add_argument('--out', help='output folder (default: stills/<camera>)')
     ap.add_argument('--manifest', help='CSV with columns video, camera and optionally out, to run many cameras')
     ap.add_argument('--overrides', help='CSV of hand-read frames (review.csv format) to use instead of the bar')
-    ap.add_argument('--glyphs', default=DEFAULT_GLYPHS, help='bar font glyphs (default: %(default)s)')
+    ap.add_argument('--glyphs', default='auto',
+                    help="bar font glyphs (camstills/glyphs/*.npz), or 'auto' (default): the stored font that reads "
+                         "the recording's sample frames best")
     ap.add_argument('--bar-px', type=int, help='bar height in pixels (default: frame height / 30)')
+    ap.add_argument('--keep-going', action='store_true',
+                    help='read the whole recording even if none of its first %d frames can be read' % STOP_AFTER)
     a = ap.parse_args(argv)
 
     jobs = {}                   # (camera, out) -> [videos]
@@ -255,14 +308,17 @@ def main(argv=None):
     if not jobs:
         ap.error('give video files with --camera, or --manifest')
 
-    glyphs = Glyphs.load(a.glyphs)
+    glyphs = a.glyphs if a.glyphs == 'auto' else Glyphs.load(a.glyphs)
     overrides = load_overrides(a.overrides)
     for (cam, out), videos in jobs.items():
         print(f'{cam}: {len(videos)} recording(s) -> {out}')
         for v in videos:
             if not os.path.exists(v):
                 sys.exit(f'not found: {v}')
-        extract(videos, cam, out, glyphs, a.bar_px, overrides)
+        try:
+            extract(videos, cam, out, glyphs, a.bar_px, overrides, keep_going=a.keep_going)
+        except ValueError as err:
+            sys.exit(f'{cam}: {err}')
 
 
 if __name__ == '__main__':

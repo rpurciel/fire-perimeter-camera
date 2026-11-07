@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calibration Step</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="setup">
+<header>
+  <div class="ws-head">
+    <a href="/" class="muted small" title="Back to the portal (workspaces, cameras)">◀ Portal</a>
+    <h1 id="title">Calibration step</h1>
+  </div>
+  <div class="seg" id="camTabs" role="tablist"></div>
+  <a id="openApp" class="button-link" href="/app?space=calibration" title="The workspace: calibration and analysis spaces">Open the workspace →</a>
+</header>
+
+<main>
+  <section class="left">
+    <div id="viewer">
+      <canvas id="canvas" tabindex="0"></canvas>
+      <div id="prompt" class="prompt" hidden></div>
+      <div class="viewer-tools">
+        <span id="cursor" class="mono"></span>
+        <button id="fit" title="Fit image (F)">Fit</button>
+      </div>
+    </div>
+    <p class="hint" id="viewerHint">Scroll to zoom · drag to pan · F fits · Esc cancels. Red: the modelled skyline of the calibration in use; green: the proposed calibration (yellow dashes: its automatic result, once you have adjusted it). Landmarks: green circle where you clicked, cyan × where the calibration puts it. Suggested landmarks: ◇ where the calibration puts them (click one to place it).</p>
+    <div id="strip" class="strip"></div>
+    <div id="mapWrap">
+      <div id="map"></div>
+      <p class="hint">Map: while adding a landmark, click its location to fill in latitude, longitude and the DEM elevation. Dashed: the selected frame's field of view.</p>
+    </div>
+  </section>
+
+  <aside>
+    <div class="card">
+      <h2>1 · Landmarks <span class="muted">(optional)</span> · <span class="camname"></span></h2>
+      <p class="small muted">A landmark is a feature you can find both in a frame and on the map: a summit, a tower, a road junction, a lake shore. Each one pins the calibration where the skyline alone is weak, above all the direction (pan). Landmarks on the <b>stills</b> matter most: they set the offset of that camera position.</p>
+      <div class="btns">
+        <button id="addLm" class="primary">Add landmark</button>
+        <button id="suggest" title="Peaks, lookouts and towers with known coordinates (NOAA NGS survey marks, OpenStreetMap, FAA obstacles) that the camera can see">Suggest landmarks</button>
+      </div>
+      <div id="candBox" hidden>
+        <p id="candInfo" class="small muted"></p>
+        <label class="check small"><input type="checkbox" id="candShow" checked> Show them on the frame (◇ where the calibration puts them) and the map</label>
+        <ul id="candList" class="list"></ul>
+      </div>
+      <form id="lmForm" hidden>
+        <p class="muted small">At pixel <span id="lmPix" class="mono"></span> of <span id="lmFrame"></span></p>
+        <label>Name <input id="lmName" value="Peak"></label>
+        <label>Latitude <input id="lmLat" inputmode="decimal" placeholder="deg (or paste lat, lon)"></label>
+        <label>Longitude <input id="lmLon" inputmode="decimal" placeholder="deg"></label>
+        <label>Elevation <input id="lmZ" inputmode="decimal" placeholder="m (DEM)"></label>
+        <div class="btns">
+          <button type="button" id="lmSnap" title="Move the point to the highest DEM point within 300 m">Snap to summit</button>
+          <button type="submit" class="primary">Confirm landmark</button>
+          <button type="button" id="lmCancel">Cancel</button>
+        </div>
+      </form>
+      <ul id="lmList" class="list"></ul>
+    </div>
+
+    <div class="card">
+      <h2>2 · Calibrate</h2>
+      <p class="small muted">Puts the modelled skyline on the silhouette edges of the panorama frames and of the camera's stills (no detected skyline is used), pulled toward the landmarks. The shared correction comes from the panorama; each camera position seen in the stills then gets its own small pan/tilt offset. Takes about a minute per camera. The result is a <b>proposal</b>: check it and adjust it in step 3, then accept it.</p>
+      <div class="btns">
+        <button id="calOne" class="primary">Calibrate this camera</button>
+        <button id="calAll">Calibrate all cameras</button>
+      </div>
+      <div id="jobs"></div>
+    </div>
+
+    <div class="card" id="adjCard">
+      <h2>3 · Check, adjust &amp; accept · <span class="camname"></span></h2>
+      <p id="propStatus" class="small"></p>
+      <div id="adjBody" hidden>
+        <div class="adj-row"><span class="small muted">Applies to</span>
+          <div class="seg" id="scopeSeg">
+            <button data-scope="camera" class="on" title="The camera's shared correction: every frame moves">Whole camera</button>
+            <button data-scope="position" title="Only the stills taken at this frame's pan/tilt/zoom (X, Y, Z)">This camera position</button>
+          </div>
+        </div>
+        <p id="scopeHint" class="small muted"></p>
+        <div class="adj-row nudges">
+          <span class="small muted">Move</span>
+          <button data-nudge="left" title="Left 1 px (←; Shift: 10 px)">←</button><button data-nudge="right" title="Right 1 px (→; Shift: 10 px)">→</button>
+          <button data-nudge="up" title="Up 1 px (↑; Shift: 10 px)">↑</button><button data-nudge="down" title="Down 1 px (↓; Shift: 10 px)">↓</button>
+          <span class="small muted">Rotate</span>
+          <button data-nudge="ccw" title="Anticlockwise 0.05° ([; Shift: 0.5°)">⟲</button><button data-nudge="cw" title="Clockwise 0.05° (]; Shift: 0.5°)">⟳</button>
+          <span class="small muted">Stretch</span>
+          <button data-nudge="shrink" title="Shrink 0.1% (−; Shift: 1%)">−</button><button data-nudge="grow" title="Stretch 0.1% (=; Shift: 1%)">+</button>
+        </div>
+        <p class="small muted">On the image: drag the green line to move it, a round handle to rotate it and a square one to stretch it, about the ⊕ point (hold Shift for fine control). Keys: arrows move 1 px (Shift: 10), [ ] rotate 0.05° (Shift: 0.5°), − = stretch 0.1% (Shift: 1%). Or type the values below.</p>
+        <table id="adjVals" class="pose mono"></table>
+        <div class="btns">
+          <button id="accept" class="primary" title="Use this calibration for the camera (measured again on the frames first)">Accept calibration</button>
+          <button id="resetAdj" title="Undo all manual adjustments: back to the automatic result">Reset to automatic</button>
+          <button id="discard" title="Drop the proposal; the calibration in use stays">Discard proposal</button>
+        </div>
+      </div>
+      <div class="btns" id="startWrap"><button id="startAdj" title="Propose the calibration in use, to adjust it by hand without a new fit">Adjust the calibration in use</button></div>
+    </div>
+
+    <div class="card">
+      <h2>Calibration details · <span class="camname"></span></h2>
+      <div id="result"></div>
+    </div>
+
+    <div class="card">
+      <h2>Messages</h2>
+      <ul id="log" class="log mono small"></ul>
+    </div>
+  </aside>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="/static/common.js"></script>
+<script src="/static/setup.js"></script>
+</body>
+</html>

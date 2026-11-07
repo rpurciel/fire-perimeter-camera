@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fire Camera Workspaces</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="portal">
+<header>
+  <h1 id="title">Fire camera workspaces</h1>
+  <span id="wsDir" class="muted small mono"></span>
+</header>
+
+<main class="portal-main">
+  <!-- Workspace list and New workspace (no workspace open) -->
+  <section id="pickView">
+    <div class="card">
+      <h2>Open a workspace</h2>
+      <ul id="wsList" class="list ws-list"></ul>
+      <p id="wsNone" class="muted small" hidden>No workspaces yet. Create one below.</p>
+    </div>
+    <form id="newWs" class="card">
+      <h2>New workspace</h2>
+      <p class="muted small">One workspace per fire. It keeps the cameras, their panoramas and calibrations, and the fire edges you draw.</p>
+      <div class="grid2">
+        <label>Name <input id="wsName" placeholder="e.g. Hawk Fire 2026" required></label>
+        <label>Camera clock, UTC offset <input id="wsOffset" placeholder="e.g. -07:00 (optional)"></label>
+      </div>
+      <p class="muted small">The UTC offset of the time printed on the cameras' info bars. It time-stamps the exports for Google Earth; without it, times stay on the camera clock.</p>
+      <div class="btns"><button type="submit" class="primary">Create workspace</button></div>
+    </form>
+  </section>
+
+  <!-- One workspace: its cameras, Add camera, Load & calibrate -->
+  <section id="wsView" hidden>
+    <div class="card">
+      <div class="row-head">
+        <h2 id="wsTitle">Workspace</h2>
+        <button id="switchWs" class="small">Other workspace…</button>
+      </div>
+      <p id="wsInfo" class="muted small"></p>
+      <ul id="camList" class="list cam-list"></ul>
+      <p id="camNone" class="muted small" hidden>No cameras yet. Add each camera below.</p>
+      <div class="btns load-row">
+        <button id="loadAll" class="primary" title="Read the stills' info bars if needed, load the DEM and the camera models">Load cameras</button>
+        <a id="openSetup" class="button-link" href="/setup" hidden title="Representative frames, landmarks, calibration">Calibration step →</a>
+        <a id="openApp" class="button-link" href="/app" hidden>Open the workspace →</a>
+      </div>
+      <div id="jobs"></div>
+    </div>
+
+    <div class="card" id="demCard">
+      <h2>Elevation model (DEM)</h2>
+      <p class="muted small">The terrain the cameras are modelled on: the skyline the calibration fits, and the ground the fire edges are draped on. <b>SRTM</b> (30 m tiles, in the DEM folder) smooths summits and ridges away. <b>USGS 3DEP</b> (about 10 m, downloaded from the USGS for an area around the cameras; SRTM beyond it) resolves them. With 3DEP, the camera's site and height must be right to a few metres: use <b>Check site</b> on each camera.</p>
+      <div class="adj-row">
+        <div class="seg" id="demSeg">
+          <button data-dem="srtm">SRTM 30 m</button>
+          <button data-dem="3dep10">USGS 3DEP 10 m</button>
+        </div>
+        <label class="small inline">3DEP within <input id="demRadius" inputmode="decimal" size="4"> km of the cameras</label>
+      </div>
+      <p id="demStatus" class="small"></p>
+      <div class="btns"><button id="demFetch" title="Download the 3DEP grid of the area (USGS 3DEP ImageServer, no account needed)">Download 3DEP</button></div>
+      <p class="muted small">Changing the DEM unloads the cameras (Load cameras again). A calibration made on the other DEM is marked; calibrate the camera again in the calibration step.</p>
+    </div>
+
+    <form id="addCam" class="card">
+      <h2>Add camera</h2>
+      <div class="grid2">
+        <label>Name <input id="camName" placeholder="e.g. Chimney Peak" required></label>
+        <label>Height (camera elevation)
+          <span class="inline"><input id="camElev" inputmode="decimal" placeholder="e.g. 8179" required>
+          <select id="camElevUnit"><option value="ft">ft</option><option value="m">m</option></select></span></label>
+        <label>Latitude <input id="camLat" inputmode="decimal" placeholder="deg, e.g. 39.458017" required></label>
+        <label>Longitude <input id="camLon" inputmode="decimal" placeholder="deg, e.g. -119.955943" required></label>
+      </div>
+      <p class="muted small">Click the map to fill in the location.</p>
+      <label>Panorama <input id="camPano" type="file" accept="image/*" multiple></label>
+      <p class="muted small">The camera's panorama image (frames side by side, each with its info bar), or several single frames. It calibrates the camera automatically from the skyline. Optional: without one, calibrate with landmarks in the calibration space.</p>
+      <label>Stills folder
+        <span class="inline"><input id="camStills" placeholder="e.g. stills/Chimney-Peak" required>
+        <button type="button" id="browse">Browse…</button></span></label>
+      <div id="browser" class="browser" hidden>
+        <div class="row-head"><span id="brPath" class="mono small"></span><button type="button" id="brUse" class="small primary">Use this folder</button></div>
+        <ul id="brList" class="list"></ul>
+      </div>
+      <div class="btns"><button type="submit" class="primary">Add camera</button></div>
+    </form>
+
+    <div class="card"><div id="pmap" class="pmap"></div></div>
+  </section>
+
+  <div class="card">
+    <h2>Messages</h2>
+    <ul id="log" class="log mono small"></ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="/static/common.js"></script>
+<script src="/static/portal.js"></script>
+</body>
+</html>

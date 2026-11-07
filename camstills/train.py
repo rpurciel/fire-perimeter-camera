@@ -115,6 +115,24 @@ def build(samples, per_char=30, reject=np.inf, seed=0, pitch=0):
     return Glyphs(chars, widths, canv, reject, pitch)
 
 
+def reject_threshold(glyphs, samples):
+    """Unknown-glyph threshold: how far a new instance of a character can be from its stored examples.
+
+    Each training glyph is compared with the OTHER stored examples of its character (leave-one-out: with
+    few stills most training glyphs are themselves stored, and would score 0). The threshold is 3x the 99th
+    percentile of those distances, but at most 1.5x the largest, so that it stays below what scene clutter
+    scores when there are few examples. (For the shipped 4K ALERTWildfire glyphs this gives their
+    threshold, 0.019; 1080p frames, with 6 stills, get 0.049, below scene cells at >= 0.055.)"""
+    dist = []
+    for ch, b, s, e in samples:
+        c = glyphs.canvas(b, s, e)
+        same = np.flatnonzero((glyphs.chars == ch) & (np.abs(glyphs.widths - (e - s)) <= 2))
+        others = [k for k in same if not np.array_equal(glyphs.canvases[k], c)]
+        if others:
+            dist.append(np.abs(glyphs._shifted[others] - c).mean((2, 3)).min())
+    return min(3 * float(np.percentile(dist, 99)), 1.5 * float(np.max(dist)))
+
+
 def check(glyphs, rows, stills_dir, bar_px, top):
     """Read each still's bar and compare with its index row. Returns (n ok, mismatches, glyph distances)."""
     ok, bad = 0, []
@@ -160,9 +178,7 @@ def main(argv=None):
     glyphs = build(samples, a.per_char, pitch=pitch)
     print(f'training: {len(train_rows)} stills, {kept}/{total} bar ends lined up, '
           f'{len(samples)} glyphs, {len(set(glyphs.chars))} characters: {"".join(sorted(set(glyphs.chars)))}')
-    # unknown-glyph threshold: well above the worst distance of a correctly read training glyph
-    dist = [glyphs.match(b, s, e)[1] for c, b, s, e in samples[::7]]
-    glyphs.reject = 3 * float(np.percentile(dist, 99))
+    glyphs.reject = reject_threshold(glyphs, samples)
     print(f'unknown-glyph threshold {glyphs.reject:.3f}')
     if test_rows:
         ok, bad = check(glyphs, test_rows, stills_dir, a.bar_px, top)

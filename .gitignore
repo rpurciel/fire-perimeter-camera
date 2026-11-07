@@ -5,3 +5,14 @@ unused/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Downloaded data (USGS 3DEP elevation grids, the FAA obstacle file): large, fetched again on demand
+downloads/
+
+# Data that stays local: recordings, extracted stills, fire workspaces (per-fire state), loose images at the top level
+*.mp4
+stills/
+old_stills/
+workspaces/
+/*.png
+/*.jpg

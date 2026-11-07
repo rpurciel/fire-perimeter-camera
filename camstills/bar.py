@@ -14,6 +14,8 @@ Bars from frames of other sizes are rescaled to the reference height (24 px of a
 size follows the frame height. The black bar itself can be shorter than that window (ALERTWildfire bars are
 20 px of 720), so the rows of scene above it are found (bar_top) and blanked before reading.
 """
+import glob
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -30,6 +32,7 @@ SHIFTS = (-1, 0, 1)        # sub-pixel placement varies; compare at +-1 column
 WIDTH_COST = 0.005         # per column of width difference
 PAD = 2                    # empty columns left of each glyph on its canvas
 CELL_INK = 105             # a monospace cell holds a character if any pixel is brighter than this (0-255)
+GLYPHS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'glyphs')
 
 
 def default_bar_px(frame_h):
@@ -132,6 +135,8 @@ def cell_grid(b, pitch, end=None, spread=0.01, step=None):
 def char_cells(b, pitch, end=None):
     """(start, stop) column ranges of the monospace cells that hold a character (empty cells are spaces)."""
     end = b.shape[1] if end is None else end
+    if end < pitch:                       # no bar to read (e.g. scene rows taken for the bar)
+        return []
     p, ph = cell_grid(b, pitch, end)
     col = b.max(0)
     edges = np.round(ph + np.arange(int((end - ph) / p) + 1) * p).astype(int)
@@ -289,3 +294,50 @@ def read_bar(gray, glyphs, bar_px=None, top=None):
         r.problems.append('no date/time')
     r.score = max(worst) if worst else np.inf
     return r
+
+
+# ------------------------------------------------------------ set-up helpers --
+
+def bar_geometry(grays, bar_px=None):
+    """(bar top row in the rescaled strip, black bar height in frame pixels) for frames of one camera.
+
+    grays: grayscale frames (H x W, 0-255), all the same size, or only their bottom bar_px rows (then bar_px
+    must be given). The top is the most common certain bar_top (common_top); a bar that fills the strip
+    gives 0 and the whole strip height."""
+    strips, px = [], None
+    for g in grays:
+        px = bar_px or default_bar_px(g.shape[0])
+        strips.append(bar_strip(g, px))
+    if not strips:
+        return 0, None
+    top = common_top(strips)
+    return top, round((REF_BAR_PX - top) * px / REF_BAR_PX)
+
+
+def bar_height(gray, bar_px=None):
+    """Height in frame pixels of the black bar at the bottom of one frame (bar_top of that frame alone)."""
+    n = bar_px or default_bar_px(gray.shape[0])
+    return round((REF_BAR_PX - bar_top(bar_strip(gray, n))[0]) * n / REF_BAR_PX)
+
+
+def glyph_sets():
+    """Paths of the stored bar fonts (glyphs/*.npz)."""
+    return sorted(glob.glob(os.path.join(GLYPHS_DIR, '*.npz')))
+
+
+def pick_glyphs(grays, bar_px=None, paths=None, top=None):
+    """(path, Glyphs) of the stored bar font that reads these frames best, or (None, None) if none reads any.
+
+    grays as for bar_geometry (only the bottoms: give bar_px). top: the bar's first strip row (bar_geometry;
+    one frame alone can mistake a dark scene for the bar), else found on each frame. Best = most frames with
+    pan, tilt, zoom and time read; ties go to the lower mean glyph distance."""
+    best = (0, -np.inf, None, None)
+    for path in paths or glyph_sets():
+        g = Glyphs.load(path)
+        reads = [read_bar(gr, g, bar_px, top) for gr in grays]
+        n_ok = sum(None not in (r.X, r.Y, r.Z) and bool(r.timestamp) for r in reads)
+        scores = [r.score for r in reads if np.isfinite(r.score)]
+        rank = (n_ok, -float(np.mean(scores)) if scores else -np.inf)
+        if n_ok and rank > best[:2]:
+            best = (*rank, path, g)
+    return best[2], best[3]
