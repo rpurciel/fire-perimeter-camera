@@ -27,7 +27,7 @@
         <button id="fit" title="Fit image (F)">Fit</button>
       </div>
     </div>
-    <p class="hint" id="viewerHint">Scroll to zoom · drag to pan · F fits · Esc cancels. Red: the modelled skyline of the calibration in use; green: the proposed calibration (yellow dashes: its automatic result, once you have adjusted it). Landmarks: green circle where you clicked, cyan × where the calibration puts it. Suggested landmarks: ◇ where the calibration puts them (click one to place it).</p>
+    <p class="hint" id="viewerHint">Scroll to zoom · drag to pan · F fits · Esc cancels. Red: the modelled skyline of the calibration in use; green: the proposed calibration. Landmarks: green circle where you clicked, cyan × where the calibration puts it. Suggested landmarks: ◇ where the calibration puts them (click one to place it).</p>
     <div id="strip" class="strip"></div>
     <div id="mapWrap">
       <div id="map"></div>
@@ -65,7 +65,13 @@
 
     <div class="card">
       <h2>2 · Calibrate</h2>
-      <p class="small muted">Puts the modelled skyline on the silhouette edges of the panorama frames and of the camera's stills (no detected skyline is used), pulled toward the landmarks. The shared correction comes from the panorama; each camera position seen in the stills then gets its own small pan/tilt offset. Takes about a minute per camera. The result is a <b>proposal</b>: check it and adjust it in step 3, then accept it.</p>
+      <div class="horizon">
+        <label for="horizon" class="small">Horizon distance · <span class="camname"></span></label>
+        <div class="adj-row"><input type="range" id="horizon" min="20" max="250" step="5">
+          <span class="mono small"><span id="horizonVal"></span> km</span></div>
+        <p id="horizonNote" class="small muted"></p>
+      </div>
+      <p class="small muted">Puts the modelled skyline on the silhouette edges of the panorama frames and of the camera's stills (no detected skyline is used), pulled toward the landmarks. The shared correction comes from the panorama; each camera position seen in the stills then gets its own small pan/tilt offset. Takes about a minute per camera. The result is a <b>proposal</b>: check it in step 3, then accept it.</p>
       <div class="btns">
         <button id="calOne" class="primary">Calibrate this camera</button>
         <button id="calAll">Calibrate all cameras</button>
@@ -74,34 +80,12 @@
     </div>
 
     <div class="card" id="adjCard">
-      <h2>3 · Check, adjust &amp; accept · <span class="camname"></span></h2>
+      <h2>3 · Check &amp; accept · <span class="camname"></span></h2>
       <p id="propStatus" class="small"></p>
-      <div id="adjBody" hidden>
-        <div class="adj-row"><span class="small muted">Applies to</span>
-          <div class="seg" id="scopeSeg">
-            <button data-scope="camera" class="on" title="The camera's shared correction: every frame moves">Whole camera</button>
-            <button data-scope="position" title="Only the stills taken at this frame's pan/tilt/zoom (X, Y, Z)">This camera position</button>
-          </div>
-        </div>
-        <p id="scopeHint" class="small muted"></p>
-        <div class="adj-row nudges">
-          <span class="small muted">Move</span>
-          <button data-nudge="left" title="Left 1 px (←; Shift: 10 px)">←</button><button data-nudge="right" title="Right 1 px (→; Shift: 10 px)">→</button>
-          <button data-nudge="up" title="Up 1 px (↑; Shift: 10 px)">↑</button><button data-nudge="down" title="Down 1 px (↓; Shift: 10 px)">↓</button>
-          <span class="small muted">Rotate</span>
-          <button data-nudge="ccw" title="Anticlockwise 0.05° ([; Shift: 0.5°)">⟲</button><button data-nudge="cw" title="Clockwise 0.05° (]; Shift: 0.5°)">⟳</button>
-          <span class="small muted">Stretch</span>
-          <button data-nudge="shrink" title="Shrink 0.1% (−; Shift: 1%)">−</button><button data-nudge="grow" title="Stretch 0.1% (=; Shift: 1%)">+</button>
-        </div>
-        <p class="small muted">On the image: drag the green line to move it, a round handle to rotate it and a square one to stretch it, about the ⊕ point (hold Shift for fine control). Keys: arrows move 1 px (Shift: 10), [ ] rotate 0.05° (Shift: 0.5°), − = stretch 0.1% (Shift: 1%). Or type the values below.</p>
-        <table id="adjVals" class="pose mono"></table>
-        <div class="btns">
-          <button id="accept" class="primary" title="Use this calibration for the camera (measured again on the frames first)">Accept calibration</button>
-          <button id="resetAdj" title="Undo all manual adjustments: back to the automatic result">Reset to automatic</button>
-          <button id="discard" title="Drop the proposal; the calibration in use stays">Discard proposal</button>
-        </div>
+      <div class="btns" id="acceptBtns" hidden>
+        <button id="accept" class="primary" title="Use this calibration for the camera">Accept calibration</button>
+        <button id="discard" title="Drop the proposal; the calibration in use stays">Discard proposal</button>
       </div>
-      <div class="btns" id="startWrap"><button id="startAdj" title="Propose the calibration in use, to adjust it by hand without a new fit">Adjust the calibration in use</button></div>
     </div>
 
     <div class="card">

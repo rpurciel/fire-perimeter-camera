@@ -403,7 +403,7 @@ def run(paths, cam, tiles, out_dir, camera, hfov0=60.0, lean='auto', n_frames=No
         bar_px=None, glyphs=DEFAULT_GLYPHS, bars=None, az_range=AZ_RANGE, verbose=True, log=print, frames_out=None,
         method='edges', dem=None):
     """Whole pipeline; returns (correction, mat path, overlay path). dem: the DEM to use (e.g. a
-    core.LayeredDEM already in memory); default the SRTM mosaic of tiles. cam may give lat, lon only:
+    core.Terrain already in memory); default the SRTM mosaic of tiles. cam may give lat, lon only:
     the elevation is then taken from the frames' info bars. log receives the progress lines; if
     frames_out is a list, the frames (with their bars, notes and error statistics) are appended to it.
 

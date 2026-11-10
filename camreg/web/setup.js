@@ -1,8 +1,8 @@
 // Calibration step (camreg/server.py /setup): representative frames of each camera, optional landmarks clicked
-// on them, and the edge-based calibration (camreg/edgefit.py) run per camera. Its result is a proposal, which can
-// be moved, rotated and stretched by hand before it is accepted. The server projects the skylines and landmarks
-// (/api/setup/predict) and turns a hand adjustment (a 2-D similarity drawn here) into camera angles
-// (/api/setup/adjust), so this page has no camera maths of its own.
+// on them, how far out the modelled skyline reaches (the horizon distance), and the edge-based calibration
+// (camreg/edgefit.py) run per camera. Its result is a proposal, checked on the frames and then accepted or
+// discarded. The server projects the skylines and landmarks (/api/setup/predict), so this page has no camera
+// maths of its own.
 // Pixel coordinates are 1-based like the rest of the app (pixel centres at 1..w, 1..h).
 'use strict';
 
@@ -10,10 +10,7 @@ const $ = (id) => document.getElementById(id);
 const P = {
   ws: null, cams: [], K: null,          // K: { id, name, frames, landmarks, calibration, rev, site }
   frame: null, img: null, view: { s: 1, ox: 0, oy: 0 }, lines: {}, pred: [], fov: null,
-  mode: null, pending: null, busy: false,
-  // hand adjustment of the proposal: transforms [a, b, tx, c, d, ty] (u' = a u + b v + tx, v' = c u + d v + ty)
-  // not yet sent (pend), being turned into angles by the server (infl) and being dragged (dragT)
-  scope: 'camera', pend: null, infl: null, dragT: null, adj: null, flushTimer: null, lmErr: null,
+  mode: null, pending: null, busy: false, lmErr: null,
   // suggested landmarks (reference points the camera can see, /api/reference/candidates) and the one being placed
   cands: null, cand: null,
 };
@@ -38,11 +35,11 @@ function log(msg, err) {
 async function busy(fn) {
   if (P.busy) return;
   P.busy = true;
-  document.querySelectorAll('aside button').forEach((b) => (b.disabled = true));
+  document.querySelectorAll('aside button, #horizon').forEach((b) => (b.disabled = true));
   try { await fn(); } catch (e) { log(e.message, true); }
   finally {
-    P.busy = false; document.querySelectorAll('aside button').forEach((b) => (b.disabled = false));
-    if (P.K) { renderAdjust(); draw(); }
+    P.busy = false; document.querySelectorAll('aside button, #horizon').forEach((b) => (b.disabled = false));
+    if (P.K) { renderAccept(); draw(); }
   }
 }
 
@@ -73,20 +70,6 @@ function stroke(pts, color, width, dash) {
   ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash || []); polyline(pts); ctx.stroke(); ctx.setLineDash([]);
 }
 
-// ------------------------------------------------------ 2-D similarities --
-const ID = () => [1, 0, 0, 0, 1, 0];
-const tmul = (B, A) => [B[0] * A[0] + B[1] * A[3], B[0] * A[1] + B[1] * A[4], B[0] * A[2] + B[1] * A[5] + B[2],
-  B[3] * A[0] + B[4] * A[3], B[3] * A[1] + B[4] * A[4], B[3] * A[2] + B[4] * A[5] + B[5]];      // B after A
-const tapply = (T, [u, v]) => [T[0] * u + T[1] * v + T[2], T[3] * u + T[4] * v + T[5]];
-const isId = (T) => T.every((x, i) => Math.abs(x - ID()[i]) < 1e-9);
-function similarity([pu, pv], rotDeg = 0, scale = 1, du = 0, dv = 0) {   // about (pu, pv); positive = clockwise on screen
-  const t = rotDeg * Math.PI / 180, a = scale * Math.cos(t), b = -scale * Math.sin(t), c = scale * Math.sin(t), d = a;
-  return [a, b, pu - a * pu - b * pv + du, c, d, pv - c * pu - d * pv + dv];
-}
-// What the proposed line looks like now: its last server projection with the adjustments not yet turned into angles.
-const shownT = () => tmul(P.dragT || ID(), tmul(P.pend || ID(), P.infl || ID()));
-const shownLine = () => (P.lines.proposal ? (() => { const T = shownT(); return P.lines.proposal.map((p) => tapply(T, p)); })() : null);
-
 function draw() {
   const dpr = window.devicePixelRatio || 1, [w, h] = frameSize(), { s, ox, oy } = P.view;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -97,16 +80,14 @@ function draw() {
   }
   ctx.lineJoin = 'round';
   const L = P.lines, prop = P.K && P.K.proposal;
-  if (prop) {                                      // in use red; automatic result yellow; proposed green
+  if (prop) {                                      // in use red; proposed green
     if (L.calibration) stroke(L.calibration, 'rgba(255,40,40,.9)', 1.2);
-    if (L.auto && prop.adjusted) stroke(L.auto, 'rgba(255,214,0,.95)', 1.2, [6, 4]);
-    if (L.proposal) stroke(shownLine(), '#22e04a', 1.6);
+    if (L.proposal) stroke(L.proposal, '#22e04a', 1.6);
   } else {
     if (L.previous) stroke(L.previous, 'rgba(255,40,40,.9)', 1.2);
     if (L.calibration) stroke(L.calibration, edgeCalibrated() ? '#22e04a' : '#ff2a2a', 1.6);
   }
   ctx.font = '12px sans-serif';
-  const T = prop ? shownT() : ID();
   const lm = P.K ? P.K.landmarks : { gcp: [], stills: [], names: [] };
   lm.gcp.forEach((g, i) => {
     if (lm.stills[i] !== P.frame.id) return;
@@ -114,7 +95,7 @@ function draw() {
     ctx.strokeStyle = '#22e04a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, 7, 0, 2 * Math.PI); ctx.stroke();
     const p = P.pred.find((q) => q[0] === i);
     if (p) {
-      const [px, py] = toScreen(...tapply(T, [p[1], p[2]]));
+      const [px, py] = toScreen(p[1], p[2]);
       ctx.strokeStyle = '#00e5ff'; ctx.lineWidth = 1.8;
       ctx.beginPath(); ctx.moveTo(px - 6, py - 6); ctx.lineTo(px + 6, py + 6); ctx.moveTo(px - 6, py + 6); ctx.lineTo(px + 6, py - 6); ctx.stroke();
       ctx.lineWidth = 0.8; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(px, py); ctx.stroke();
@@ -126,7 +107,7 @@ function draw() {
     const used = new Set((lm.info || []).map((x) => x && x.ref_id).filter(Boolean));
     for (const c of P.cands) {
       if (!c.in_frame || used.has(c.id)) continue;
-      const [x, y] = toScreen(...tapply(T, [c.u, c.v])), on = P.cand && P.cand.id === c.id, r = on ? 7 : 5;
+      const [x, y] = toScreen(c.u, c.v), on = P.cand && P.cand.id === c.id, r = on ? 7 : 5;
       ctx.strokeStyle = CAND_COLOR[c.source] || '#ffb300'; ctx.lineWidth = on ? 2.4 : 1.4;
       ctx.beginPath(); ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y); ctx.closePath(); ctx.stroke();
       if (on || P.view.s > 1.2) {                   // names when zoomed in (the list has them all)
@@ -140,84 +121,12 @@ function draw() {
     ctx.strokeStyle = '#22e04a'; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(x - 10, y); ctx.lineTo(x + 10, y); ctx.moveTo(x, y - 10); ctx.lineTo(x, y + 10); ctx.stroke();
   }
-  const g = adjustable() && (P.adj ? P.adj.g : gizmo());
-  if (g) drawGizmo(g);
-}
-
-// ------------------------------------------------- hand adjustment: gizmo --
-// The ⊕ pivot sits on the proposed line in the middle of the view; round handles (rotate) and square ones
-// (stretch) on a bar through it. Dragging the line moves it.
-const adjustable = () => !!(P.K && P.K.proposal && P.frame && P.lines.proposal && !P.busy && !P.mode &&
-  (P.scope === 'camera' || P.frame.kind === 'still'));
-function lineV(line, u) {                          // v of a line (sorted by u) at column u
-  let i = 1;
-  while (i < line.length - 1 && line[i][0] < u) i++;
-  const [a, b] = [line[i - 1], line[i]], t = b[0] === a[0] ? 0 : (u - a[0]) / (b[0] - a[0]);
-  return a[1] + t * (b[1] - a[1]);
-}
-function gizmo() {
-  const line = shownLine();
-  if (!line || line.length < 2) return null;
-  const [w] = frameSize(), [u0] = toImage(0, 0), [u1] = toImage(canvas.clientWidth, 0);
-  const lo = Math.max(line[0][0], u0, 1), hi = Math.min(line[line.length - 1][0], u1, w);
-  if ((hi - lo) * P.view.s < 40) return null;
-  const pivot = [(lo + hi) / 2, lineV(line, (lo + hi) / 2)], [px, py] = toScreen(...pivot);
-  return { pivot, px, py, L: Math.max(50, Math.min(360, 0.32 * (hi - lo) * P.view.s)) };
-}
-function handles(g) {                              // screen positions; while dragging they follow the drag
-  const at = (dx) => [g.px + dx, g.py], pts = { pivot: at(0), rot: [at(-g.L), at(g.L)], str: [at(-0.55 * g.L), at(0.55 * g.L)] };
-  if (!P.dragT) return pts;
-  const f = (p) => toScreen(...tapply(P.dragT, toImage(...p)));
-  return { pivot: f(pts.pivot), rot: pts.rot.map(f), str: pts.str.map(f) };
-}
-function drawGizmo(g) {
-  const h = handles(g);
-  ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
-  ctx.beginPath(); ctx.moveTo(...h.rot[0]); ctx.lineTo(...h.rot[1]); ctx.stroke(); ctx.setLineDash([]);
-  ctx.fillStyle = '#fff'; ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5;
-  for (const [x, y] of h.rot) { ctx.beginPath(); ctx.arc(x, y, 6, 0, 2 * Math.PI); ctx.fill(); ctx.stroke(); }
-  for (const [x, y] of h.str) { ctx.fillRect(x - 5, y - 5, 10, 10); ctx.strokeRect(x - 5, y - 5, 10, 10); }
-  const [x, y] = h.pivot;
-  ctx.beginPath(); ctx.arc(x, y, 6, 0, 2 * Math.PI); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(x - 9, y); ctx.lineTo(x + 9, y); ctx.moveTo(x, y - 9); ctx.lineTo(x, y + 9); ctx.stroke();
-}
-function hitTest(x, y) {                           // screen point -> 'rotate' | 'stretch' | 'move' | null
-  const g = gizmo();
-  if (!g) return null;
-  const h = handles(g), near = (p, r) => Math.hypot(p[0] - x, p[1] - y) <= r;
-  if (h.rot.some((p) => near(p, 9))) return { kind: 'rotate', g };
-  if (h.str.some((p) => near(p, 9))) return { kind: 'stretch', g };
-  if (near(h.pivot, 9)) return { kind: 'move', g };
-  const pts = shownLine().map((p) => toScreen(...p));
-  for (let i = 1; i < pts.length; i++) {
-    const [ax, ay] = pts[i - 1], [bx, by] = pts[i], dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
-    const t = l2 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2)) : 0;
-    if (Math.hypot(ax + t * dx - x, ay + t * dy - y) <= 6) return { kind: 'move', g };
-  }
-  return null;
-}
-function dragTransform(a) {
-  const { g } = a;
-  if (a.kind === 'move') return similarity(g.pivot, 0, 1, (a.vx - a.sx) / P.view.s, (a.vy - a.sy) / P.view.s);
-  if (a.kind === 'rotate') {
-    const ang = Math.atan2(a.vy - g.py, a.vx - g.px) - Math.atan2(a.sy - g.py, a.sx - g.px);
-    return similarity(g.pivot, ((ang * 180 / Math.PI + 540) % 360) - 180);
-  }
-  const k = (a.vx - g.px) / (a.sx - g.px);
-  return similarity(g.pivot, 0, Math.max(0.5, Math.min(2, isFinite(k) ? k : 1)));
 }
 
 const edgeCalibrated = () => P.K && P.K.calibration && P.K.calibration.report && P.K.calibration.report.method === 'edges';
 
 let drag = null, moved = false;
 canvas.addEventListener('mousedown', (e) => {
-  const r = canvas.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
-  const hit = e.button === 0 && adjustable() ? hitTest(x, y) : null;
-  if (hit) {                                       // a hand adjustment (Shift: a tenth of the mouse motion)
-    P.adj = { kind: hit.kind, g: hit.g, sx: x, sy: y, vx: x, vy: y, lx: x, ly: y };
-    e.preventDefault();
-    return;
-  }
   drag = { x: e.clientX, y: e.clientY, ox: P.view.ox, oy: P.view.oy }; moved = false;
 });
 window.addEventListener('mousemove', (e) => {
@@ -226,30 +135,12 @@ window.addEventListener('mousemove', (e) => {
     const [u, v] = toImage(x, y), [w, h] = frameSize();
     if (u >= 0.5 && v >= 0.5 && u <= w + 0.5 && v <= h + 0.5) $('cursor').textContent = `u ${u.toFixed(1)}  v ${v.toFixed(1)}`;
   }
-  if (P.adj) {
-    const a = P.adj, f = e.shiftKey ? 0.1 : 1;
-    a.vx += (x - a.lx) * f; a.vy += (y - a.ly) * f; a.lx = x; a.ly = y;
-    P.dragT = dragTransform(a); draw();
-    return;
-  }
-  if (!drag && e.target === canvas) {
-    const hit = adjustable() ? hitTest(x, y) : null;
-    canvas.classList.toggle('adj-move', !!hit && hit.kind === 'move');
-    canvas.classList.toggle('adj-rotate', !!hit && hit.kind === 'rotate');
-    canvas.classList.toggle('adj-stretch', !!hit && hit.kind === 'stretch');
-  }
   if (!drag) return;
   const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
   if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
   if (moved) { P.view.ox = drag.ox + dx; P.view.oy = drag.oy + dy; draw(); }
 });
 window.addEventListener('mouseup', (e) => {
-  if (P.adj) {
-    if (P.dragT) P.pend = tmul(P.dragT, P.pend || ID());
-    P.adj = null; P.dragT = null;
-    flushAdjust();
-    return;
-  }
   const was = drag; drag = null;
   if (was && !moved && e.target === canvas && !P.mode && P.cands && $('candShow').checked) {
     const r0 = canvas.getBoundingClientRect(), c = candAt(e.clientX - r0.left, e.clientY - r0.top);
@@ -277,13 +168,10 @@ canvas.addEventListener('wheel', (e) => {
   const s = Math.min(fit * 40, Math.max(fit * 0.5, P.view.s * Math.exp(-e.deltaY * 0.0015)));
   P.view.ox = x - (x - P.view.ox) * s / P.view.s; P.view.oy = y - (y - P.view.oy) * s / P.view.s; P.view.s = s; draw();
 }, { passive: false });
-const NUDGE_KEYS = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down', BracketLeft: 'ccw',
-  BracketRight: 'cw', Minus: 'shrink', NumpadSubtract: 'shrink', Equal: 'grow', NumpadAdd: 'grow' };
 document.addEventListener('keydown', (e) => {
   if (/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) return;
   if (e.key === 'Escape') cancelLandmark();
   else if (e.key === 'f' || e.key === 'F') fitView();
-  else if (NUDGE_KEYS[e.code] && adjustable() && !e.metaKey && !e.ctrlKey) { e.preventDefault(); nudge(NUDGE_KEYS[e.code], e.shiftKey); }
 });
 $('fit').addEventListener('click', fitView);
 
@@ -301,13 +189,12 @@ function renderTabs() {
 
 async function openCamera(id, frameId) {
   cancelLandmark();
-  await settle();
   const keepCands = !!(P.cands && P.K && P.K.id === id);
   const r = await api('setup/frames', { camera: id });
   P.K = { id, ...r };
-  P.pend = P.infl = P.dragT = null; P.lmErr = null; P.cands = null; P.cand = null;
+  P.lmErr = null; P.cands = null; P.cand = null;
   $('candBox').hidden = true; $('suggest').textContent = 'Suggest landmarks';
-  renderTabs(); renderStrip(); renderLandmarks(); renderResult(); renderAdjust();
+  renderTabs(); renderStrip(); renderLandmarks(); renderResult(); renderAccept(); renderHorizon();
   const f = P.K.frames.find((x) => x.id === frameId) || P.K.frames.find((x) => x.url && x.bar && !x.note) || P.K.frames[0];
   if (f) await selectFrame(f);
   if (keepCands) { await fetchCands(false); draw(); }
@@ -329,9 +216,7 @@ function renderStrip() {
 }
 
 async function selectFrame(f) {
-  await settle();
   P.frame = f;
-  renderAdjust();
   const img = new Image();
   img.onload = () => { if (P.img === img) draw(); };
   img.src = f.url;
@@ -340,11 +225,11 @@ async function selectFrame(f) {
   await predict();
 }
 
-// Lines: with a proposal, the calibration in use, the proposal and (once adjusted) its automatic result; else
-// the calibration in use and the one before it. Landmarks are projected with the proposal if there is one.
+// Lines: with a proposal, the calibration in use and the proposal; else the calibration in use and the one before
+// it. Landmarks are projected with the proposal if there is one.
 async function fetchPredict() {
   const prop = P.K.proposal;
-  const lines = prop ? ['calibration', 'proposal'].concat(prop.adjusted ? ['auto'] : []) : ['calibration', 'previous'];
+  const lines = prop ? ['calibration', 'proposal'] : ['calibration', 'previous'];
   return api('setup/predict', { camera: P.K.id, frame: P.frame.id, lines, landmarks_with: prop ? 'proposal' : 'calibration' });
 }
 function applyPredict(r) { P.lines = r.lines; P.pred = r.landmarks; P.fov = r.fov; P.lmErr = r.landmark_errors; }
@@ -469,11 +354,10 @@ function renderCands() {
   if (!inFrame.length) $('candList').append(el('li', { className: 'muted', textContent: 'None in this frame.' }));
 }
 function candAt(x, y) {                            // the suggested point under a screen position
-  const T = P.K.proposal ? shownT() : ID();
   let best = null, bd = 9;
   for (const c of P.cands || []) {
     if (!c.in_frame) continue;
-    const [cx, cy] = toScreen(...tapply(T, [c.u, c.v])), d = Math.hypot(cx - x, cy - y);
+    const [cx, cy] = toScreen(c.u, c.v), d = Math.hypot(cx - x, cy - y);
     if (d < bd) { bd = d; best = c; }
   }
   return best;
@@ -510,16 +394,15 @@ async function waitJobs(ids) {
 }
 
 async function calibrate(ids) {
-  await settle();
   P.cams = (await api('workspace')).cameras;
   const pend = P.cams.filter((c) => ids.includes(c.id) && c.has_proposal).map((c) => c.name);
-  if (pend.length && !confirm(`This replaces the proposed calibration of ${pend.join(', ')}, and any hand adjustments made to it. Calibrate anyway?`)) return;
+  if (pend.length && !confirm(`This replaces the proposed calibration of ${pend.join(', ')}. Calibrate anyway?`)) return;
   const r = await api('calibrate', { cameras: ids });
   const jobs = await waitJobs(r.jobs);
   const failed = jobs.filter((j) => j.state === 'error');
   failed.forEach((j) => log(`${j.camera}: ${j.error}`, true));
   log(`Calibrated ${jobs.length - failed.length} camera${jobs.length - failed.length === 1 ? '' : 's'}` +
-    (failed.length ? `; ${failed.length} failed` : '') + '. Check the green lines on the frames, adjust them if needed, then accept each camera\'s calibration.');
+    (failed.length ? `; ${failed.length} failed` : '') + '. Check the green lines on the frames, then accept each camera\'s calibration.');
   const keep = P.frame && P.frame.id;
   await openCamera(P.K.id, keep);
 }
@@ -533,12 +416,11 @@ function renderResult() {
   box.append(el('p', { className: 'small', textContent: 'In use: ' + (cal.c ? cal.source : 'none (raw bar values)') }));
   const shown = prop && prop.report && prop.report.method === 'edges' ? prop : !prop && cal.report && cal.report.method === 'edges' ? cal : null;
   if (prop) box.append(el('p', { className: 'small', textContent: `Proposed (not in use yet): ${prop.source}` +
-    (prop.adjusted ? '; adjusted by hand. The frame offsets below are for the automatic result: they are measured again when you accept.' : '') }));
+    (prop.adjusted ? '; adjusted by hand (made before hand adjustment was removed; measured again when you accept).' : '') }));
   if (!shown) return;
   const rep = shown.report;
   const names = ['d_azimuth', 'd_tilt', 'roll', 'HFOV', 'lean E', 'lean N'];
-  const cols = prop ? [['in use', cal.c || RAW]].concat(prop.adjusted ? [['automatic', prop.auto.c]] : [], [['proposed', prop.c]])
-    : [['before', rep.c_previous || rep.c_start], ['in use', cal.c]];
+  const cols = prop ? [['in use', cal.c || RAW], ['proposed', prop.c]] : [['before', rep.c_previous || rep.c_start], ['in use', cal.c]];
   const tb0 = el('table', { className: 'pose mono' });
   tb0.innerHTML = '<thead><tr><th></th>' + cols.map(([n]) => `<th>${n}</th>`).join('') + '</tr></thead>';
   names.forEach((n, i) => { const tr = el('tr'); tr.append(el('th', { textContent: n }), ...cols.map(([, c]) => el('td', { textContent: deg((c || RAW)[i], 3) }))); tb0.append(tr); });
@@ -556,6 +438,7 @@ function renderResult() {
   for (const [key, o] of Object.entries(shown.pose_offsets || {}))
     box.append(el('p', { className: 'small mono', textContent: `position ${key}: pan ${deg(o.pan)}°, tilt ${deg(o.tilt)}°` +
       (o.roll || (o.scale && o.scale !== 1) ? `, roll ${deg(o.roll || 0)}°, stretch ×${(o.scale || 1).toFixed(4)}` : '') + ` · ${o.how}` }));
+  if (rep.horizon_km) box.append(el('p', { className: 'small muted', textContent: `Fitted with the skyline out to ${rep.horizon_km} km.` }));
   if (rep.overlay) {
     const a = el('a', { href: '/ws/' + rep.overlay + '?t=' + encodeURIComponent(rep.when || ''), target: '_blank' });
     a.append(el('img', { src: a.href, className: 'overlay', alt: 'Calibration overlay', title: 'Red: before; green: after. Click to open.' }));
@@ -563,148 +446,63 @@ function renderResult() {
   }
 }
 
-// ----------------------------------------------------- adjust & accept --
-const poseKey = (bar) => `${(bar[0] + 0).toFixed(2)},${(bar[1] + 0).toFixed(2)},${(bar[2] + 0).toFixed(1)}`;
-const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
+// ------------------------------------------------------ horizon distance --
+// How far out the camera's terrain is followed: the modelled skyline (the lines here and the calibration's fit)
+// and the rays that drape the edges. Longer reaches distant peaks on clear days; shorter matches a horizon that
+// haze or smoke cut short. Changing it reloads the camera (the server fetches terrain tiles it doesn't have yet).
+function renderHorizon() {
+  const h = P.K.horizon || { km: 90 }, fit = ((P.K.calibration || {}).report || {}).horizon_km;
+  $('horizon').value = h.km; $('horizonVal').textContent = h.km;
+  const t = h.terrain || {};
+  $('horizonNote').textContent = 'The modelled skyline (the lines, and what Calibrate fits) follows the terrain this far. ' +
+    'Clear days show peaks further out; on hazy or smoky frames a shorter distance matches the visible horizon. ' +
+    (t.tiles ? `Terrain: ${t.tiles} tile${t.tiles === 1 ? '' : 's'}` + (t.downloaded ? ` (${t.downloaded} downloaded)` : '') +
+      (t.missing && t.missing.length ? `; none for ${t.missing.join(', ')} (sea or outside the tile set)` : '') + '. ' : '') +
+    (fit && fit !== h.km && (P.K.calibration || {}).c ? `The calibration in use was fitted out to ${fit} km: calibrate again.` : '');
+}
+$('horizon').addEventListener('input', () => { $('horizonVal').textContent = $('horizon').value; });
+$('horizon').addEventListener('change', () => busy(async () => {
+  const km = Number($('horizon').value), name = P.K.name;
+  log(`${name}: horizon distance ${km} km; reloading the camera (terrain tiles it needs are downloaded once)...`);
+  const r = await api('setup/horizon', { camera: P.K.id, km });
+  const [job] = await waitJobs([r.job]);
+  if (job.state === 'error') { renderHorizon(); throw new Error(`${name}: ${job.error}`); }
+  (job.warnings || []).forEach((w) => log(w, true));
+  await openCamera(P.K.id, P.frame && P.frame.id);
+  log(`${name}: the skyline now reaches ${km} km. Calibrate again to fit it.`);
+}));
 
-function renderAdjust() {
+// --------------------------------------------------------------- accept --
+function renderAccept() {
   const prop = P.K && P.K.proposal, cal = (P.K && P.K.calibration) || {};
-  $('adjBody').hidden = !prop; $('startWrap').hidden = !!prop;
+  $('acceptBtns').hidden = !prop;
   const st = $('propStatus');
   st.innerHTML = '';
   if (!P.K) return;
   if (!prop) {
-    st.textContent = `In use: ${cal.c ? cal.source : 'none (raw bar values)'}. Calibrate (step 2) to propose a new calibration, or adjust the one in use by hand.`;
+    st.textContent = `In use: ${cal.c ? cal.source : 'none (raw bar values)'}. Calibrate (step 2) to propose a new calibration.`;
     return;
   }
   st.append(el('b', { className: 'pending', textContent: 'Proposed, not in use yet: ' }),
-    `${prop.source}${prop.adjusted ? ' + your adjustment' : ''}. Check the green line on the frames; drag it into place if needed, then Accept.`);
-  const still = P.frame && P.frame.kind === 'still';
-  if (!still && P.scope === 'position') P.scope = 'camera';
-  document.querySelectorAll('#scopeSeg button').forEach((b) => {
-    b.classList.toggle('on', b.dataset.scope === P.scope);
-    if (b.dataset.scope === 'position') b.disabled = !still || P.busy;
-  });
-  const key = P.frame && P.frame.bar ? poseKey(P.frame.bar) : '';
-  $('scopeHint').textContent = P.scope === 'camera'
-    ? 'Changes the camera\'s correction (azimuth, tilt, roll, field of view): the line moves on every frame and every still. Check the other frames afterwards.'
-      + (still ? '' : ' Panorama frames are drawn with their own small pan error from the fit.')
-    : `Changes only the stills taken at X, Y, Z = ${key}: their own pan, tilt, roll and stretch.`;
-  // values: automatic and now, the "now" column editable
-  const tb = $('adjVals'), auto = prop.auto || prop, po = prop.pose_offsets || {}, apo = auto.pose_offsets || {};
-  tb.innerHTML = '<thead><tr><th></th><th>automatic</th><th>now</th></tr></thead>';
-  const row = (label, a, now, id, d = 3) => {
-    const tr = el('tr'), inp = el('input', { id, value: now.toFixed(d), inputMode: 'decimal' });
-    inp.addEventListener('change', () => setValues(id.startsWith('cv') ? 'camera' : 'position'));
-    const td = el('td'); td.append(inp);
-    tr.append(el('th', { textContent: label }), el('td', { textContent: a.toFixed(d) }), td);
-    tb.append(tr);
-  };
-  tb.append(el('tr', {}, el('th', { textContent: 'Whole camera', className: 'sub' })));
-  ['d_azimuth (°)', 'd_tilt (°)', 'roll (°)', 'HFOV at Z 1 (°)'].forEach((n, i) => row(n, auto.c[i], prop.c[i], 'cv' + i));
-  if (still) {
-    const o = po[key] || {}, a = apo[key] || {};
-    tb.append(el('tr', {}, el('th', { textContent: `This position ${key}`, className: 'sub' })));
-    row('pan (°)', a.pan || 0, o.pan || 0, 'pv0'); row('tilt (°)', a.tilt || 0, o.tilt || 0, 'pv1');
-    row('roll (°)', a.roll || 0, o.roll || 0, 'pv2'); row('stretch (×)', a.scale || 1, o.scale || 1, 'pv3', 4);
-  }
-}
-
-document.querySelectorAll('#scopeSeg button').forEach((b) => b.addEventListener('click', () => {
-  P.scope = b.dataset.scope; renderAdjust(); draw();
-}));
-
-// A typed value: the whole row of four is sent, the lean kept.
-function setValues(which) {
-  busy(async () => {
-    await settle();
-    const prop = P.K.proposal;
-    let body;
-    if (which === 'camera') {
-      const v = readNums([0, 1, 2, 3].map((i) => ['cv' + i, ['d_azimuth', 'd_tilt', 'roll', 'HFOV'][i]]));
-      body = { c: [...v, prop.c[4] || 0, prop.c[5] || 0] };
-    } else {
-      const v = readNums([0, 1, 2, 3].map((i) => ['pv' + i, ['pan', 'tilt', 'roll', 'stretch'][i]]));
-      body = { offset: { key: poseKey(P.frame.bar), pan: v[0], tilt: v[1], roll: v[2], scale: v[3] } };
-    }
-    const r = await api('setup/proposal', { camera: P.K.id, action: 'set', ...body });
-    P.K.proposal = r.proposal;
-    await predict(); renderAdjust(); renderResult();
-  });
-}
-
-function nudge(kind, big) {
-  const g = gizmo(), [w, h] = frameSize(), piv = g ? g.pivot : [(w + 1) / 2, (h + 1) / 2];
-  const px = big ? 10 : 1, rot = big ? 0.5 : 0.05, sc = big ? 0.01 : 0.001;
-  const T = { left: similarity(piv, 0, 1, -px, 0), right: similarity(piv, 0, 1, px, 0), up: similarity(piv, 0, 1, 0, -px),
-    down: similarity(piv, 0, 1, 0, px), cw: similarity(piv, rot), ccw: similarity(piv, -rot),
-    grow: similarity(piv, 0, 1 + sc), shrink: similarity(piv, 0, 1 / (1 + sc)) }[kind];
-  P.pend = tmul(T, P.pend || ID());
-  draw();
-  clearTimeout(P.flushTimer);
-  P.flushTimer = setTimeout(flushAdjust, 300);
-}
-document.querySelectorAll('[data-nudge]').forEach((b) => b.addEventListener('click', (e) => {
-  if (adjustable()) nudge(b.dataset.nudge, e.shiftKey);
-}));
-
-// Turn the adjustments drawn so far into camera angles (server), then redraw from the new angles.
-async function flushAdjust() {
-  clearTimeout(P.flushTimer);
-  if (P.infl || !P.pend) return;
-  if (isId(P.pend)) { P.pend = null; return; }
-  P.infl = P.pend; P.pend = null;
-  const id = P.K.id, fid = P.frame.id, A = P.infl;
-  try {
-    const r = await api('setup/adjust', { camera: id, frame: fid, scope: P.scope, A: [A.slice(0, 3), A.slice(3)] });
-    if (P.K.id === id) {
-      P.K.proposal = r.proposal;
-      const pr = await fetchPredict();
-      if (P.K.id === id && P.frame.id === fid) { applyPredict(pr); if (P.cands) await fetchCands(false); }
-    }
-  } catch (e) { log(e.message, true); }
-  P.infl = null;
-  draw(); renderAdjust(); renderLandmarks(); drawMap();
-  if (P.pend) flushAdjust();
-}
-async function settle() {                          // wait until every adjustment has been sent
-  while (P.infl || P.pend || P.adj) {
-    if (!P.infl && P.pend && !P.adj) flushAdjust();
-    await sleep(30);
-  }
+    `${prop.source}. Check the green line on the frames (red: the calibration in use), then Accept or Discard it.`);
 }
 
 $('accept').addEventListener('click', () => busy(async () => {
-  await settle();
   const name = P.K.name, r = await api('setup/accept', { camera: P.K.id });
   const jobs = await waitJobs(r.jobs);
   if (jobs[0].state === 'error') throw new Error(`${name}: ${jobs[0].error}`);
   log(`${name}: calibration accepted (${jobs[0].result.calibration.source}).`);
   await openCamera(P.K.id, P.frame && P.frame.id);
 }));
-$('resetAdj').addEventListener('click', () => busy(async () => {
-  await settle();
-  P.K.proposal = (await api('setup/proposal', { camera: P.K.id, action: 'reset' })).proposal;
-  log(`${P.K.name}: back to the automatic result.`);
-  await predict(); renderAdjust(); renderResult();
-}));
 $('discard').addEventListener('click', () => busy(async () => {
-  await settle();
-  if (P.K.proposal.adjusted && !confirm('Discard the proposed calibration and your adjustments? The calibration in use stays.')) return;
   await api('setup/proposal', { camera: P.K.id, action: 'discard' });
   P.K.proposal = null;
   log(`${P.K.name}: proposal discarded; the calibration in use stays.`);
-  await predict(); renderAdjust(); renderResult();
-}));
-$('startAdj').addEventListener('click', () => busy(async () => {
-  P.K.proposal = (await api('setup/proposal', { camera: P.K.id, action: 'start' })).proposal;
-  log(`${P.K.name}: the calibration in use is proposed for adjusting; accept it when done.`);
-  await predict(); renderAdjust(); renderResult();
+  await predict(); renderAccept(); renderResult();
 }));
 $('openApp').addEventListener('click', (e) => {
   e.preventDefault();
   busy(async () => {
-    await settle();
     const pend = (await api('workspace')).cameras.filter((c) => c.has_proposal).map((c) => c.name);
     if (pend.length && !confirm(`${pend.join(', ')}: the proposed calibration is not accepted yet, so the workspace uses the ` +
       'calibration in use. The proposal is kept for later. Open the workspace anyway?')) return;

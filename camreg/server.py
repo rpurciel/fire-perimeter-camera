@@ -34,14 +34,15 @@ from PIL import Image
 
 from camstills import index as stills_index
 from camstills.bar import bar_geometry, default_bar_px
-from . import combine, core, dem3dep, edgefit, panorama, reference, skyline
-from .workspace import DEFAULT_DEM, DEFAULT_HFOV, Workspace, list_workspaces, now, safe_file, slug
+from . import combine, core, dem3dep, edgefit, panorama, reference, skyline, tiles
+from .workspace import DEFAULT_DEM, DEFAULT_HFOV, DEFAULT_HORIZON_KM, Workspace, list_workspaces, now, safe_file, slug
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
 # Limits of the mount correction for Optimize: d_azimuth, d_tilt, roll, HFOV at Z1, lean east, lean north.
 # The bar's pan X is the azimuth from north to a few degrees, so the azimuth offset stays small.
 CORRECTION_LIM = ((-20, 20), (-20, 20), (-12, 12), (15, 110), (-10, 10), (-10, 10))
-VIEW_KM = 90.0                 # DEM tiles are wanted this far around each camera
+NEAR_KM = 40.0                 # terrain tiles this close to a camera are loaded at full resolution, the rest at 3 arc-seconds
+HORIZON_KM_LIM = (20.0, 250.0)  # the horizon distance a camera can be given (setup_horizon)
 SAME_SITE_M = 500.0            # a calibration file belongs to a camera if its site is this close
 COVER_SLACK_KM = 1.0           # a 3DEP grid still serves a camera whose radius it misses by up to this
 MAIN_POSE_SHARE = 0.05         # a camera position with this share of the stills counts as a main one
@@ -92,17 +93,6 @@ def _site_m(a, b):
     dn = math.radians(a[0] - b[0]) * core.R_EARTH
     de = math.radians(a[1] - b[1]) * core.R_EARTH * math.cos(math.radians(a[0]))
     return math.hypot(dn, de)
-
-
-def tile_names(lat, lon, km=VIEW_KM):
-    """SRTM 1-degree tile names (e.g. N39W120.hgt) covering km around a site."""
-    dlat = km / 111.2
-    dlon = km / (111.2 * max(0.05, math.cos(math.radians(lat))))
-    out = []
-    for la in range(math.floor(lat - dlat), math.floor(lat + dlat) + 1):
-        for lo in range(math.floor(lon - dlon), math.floor(lon + dlon) + 1):
-            out.append('%s%02d%s%03d.hgt' % ('N' if la >= 0 else 'S', abs(la), 'E' if lo >= 0 else 'W', abs(lo)))
-    return out
 
 
 # ------------------------------------------------------------------ camera --
@@ -304,7 +294,9 @@ class Portal:
 
     def _camera_summary(self, cam):
         meta = {k: cam.get(k) for k in ('id', 'name', 'lat', 'lon', 'elev_m', 'stills_dir', 'glyphs', 'bar_px',
-                                        'image_size', 'hfov0', 'panoramas', 'index', 'tiles', 'tiles_missing')}
+                                        'image_size', 'hfov0', 'panoramas', 'index', 'tiles', 'tiles_missing',
+                                        'tiles_downloaded')}
+        meta['horizon_km'] = self._horizon_km(cam)
         meta['calibration_source'] = cam['calibration'].get('source', 'none')
         meta['dem'] = self._dem_label(cam)
         meta['calibration_dem'] = (cam['calibration'].get('dem') or 'srtm') if cam['calibration'].get('c') else None
@@ -519,21 +511,38 @@ class Portal:
                             first=times[0] if times else '', last=times[-1] if times else '',
                             elev_ft=elev[len(elev) // 2] if elev else None)
 
-    def _tiles(self, cam, job=None):
-        """Absolute paths of the DEM tiles found around the camera (missing ones are noted on the camera)."""
-        d = self.ws.resolve(self.ws.data.get('dem_dir') or self.dem_dir) if self.ws else self.dem_dir
-        have = {f.lower(): f for f in os.listdir(d)} if os.path.isdir(d) else {}
-        names = tile_names(cam['lat'], cam['lon'])
-        found = [os.path.join(d, have[n.lower()]) for n in names if n.lower() in have]
-        cam['tiles'] = [os.path.basename(p) for p in found]
-        cam['tiles_missing'] = [n for n in names if n.lower() not in have]
+    def _horizon_km(self, cam):
+        return float(cam.get('horizon_km') or DEFAULT_HORIZON_KM)
+
+    def _tiles(self, cam, job=None, horizon_km=None):
+        """(near, far) paths of the terrain tiles around the camera: those within NEAR_KM, and the rest within its
+        horizon distance. Missing tiles are downloaded (tiles.fetch); ones still missing are noted on the camera."""
+        d = self._dem_dir()
+        km = horizon_km or self._horizon_km(cam)
+        names = tiles.tile_names(cam['lat'], cam['lon'], km + 5)
+        found, missing = tiles.find(names, d)
+        missing = [n for n in missing if n not in tiles.unavailable(d)]
+        if missing:
+            if job:
+                job.say('Downloading %d terrain tile%s for %.0f km around the camera (once; about 10 MB each)...'
+                        % (len(missing), '' if len(missing) == 1 else 's', km))
+            found += tiles.fetch(missing, d, log=(lambda m: job.warn('%s: %s' % (cam['name'], m[9:])) if m.startswith('WARNING: ')
+                                                  else job.say(m)) if job else (lambda m: None))
+            found, missing = tiles.find(names, d)
+        near_names = {n.lower() for n in tiles.tile_names(cam['lat'], cam['lon'], NEAR_KM)}
+        near = [p for p in found if tiles.tile_name(p).lower() in near_names]
+        far = [p for p in found if tiles.tile_name(p).lower() not in near_names]
+        if horizon_km is None:
+            cam['tiles'] = sorted(tiles.tile_name(p) for p in found)
+            cam['tiles_missing'] = missing
+            cam['tiles_downloaded'] = sum(1 for p in found if os.path.dirname(p) == tiles.download_dir(d))
         if job:
-            job.say('DEM tiles: %s%s' % (', '.join(cam['tiles']) or 'none',
-                                         ('; missing within %.0f km: %s (terrain and skyline there are not modelled)'
-                                          % (VIEW_KM, ', '.join(cam['tiles_missing']))) if cam['tiles_missing'] else ''))
-        if not found:
-            raise ValueError('No DEM tiles for this camera in %s (it needs e.g. %s)' % (d, ', '.join(names[:4])))
-        return found
+            job.say('Terrain to %.0f km: %d tiles (%d at full resolution)%s' % (km, len(found), len(near),
+                    ('; none for %s (sea, or outside the tile set): not modelled' % ', '.join(missing)) if missing else ''))
+        if not near:
+            raise ValueError('No terrain tile at the camera in %s or its downloads (it needs %s)'
+                             % (d, ', '.join(sorted(near_names))))
+        return near, far
 
     def _dem_dir(self):
         return self.ws.resolve(self.ws.data.get('dem_dir') or self.dem_dir) if self.ws else self.dem_dir
@@ -561,33 +570,37 @@ class Portal:
         p = self._fine_path(cam)
         return '3dep10:' + os.path.basename(p) if p else 'srtm'
 
-    def _dem(self, cam, job=None):
-        """The camera's DEM: the SRTM mosaic, under the workspace's 3DEP grid if it uses one (core.LayeredDEM)."""
-        tiles = self._tiles(cam, job)
-        key = tuple(sorted(tiles))
+    def _grid(self, key, make, job=None, msg=None):
+        """A DEM grid from the cache, made if needed (grids are shared by the cameras that use the same tiles)."""
         with self.lock:
-            coarse = self.dems.get(key)
-        if coarse is None:
-            if job:
-                job.say('Loading DEM (%d tiles)...' % len(key))
-            coarse = core.DEM(list(key))
+            g = self.dems.get(key)
+        if g is None:
+            if job and msg:
+                job.say(msg)
+            g = make()
             with self.lock:
-                self.dems[key] = coarse
+                self.dems[key] = g
+        return g
+
+    def _dem(self, cam, job=None, horizon_km=None):
+        """The camera's terrain (core.Terrain): the workspace's 3DEP grid if it uses one, the full-resolution tiles
+        within NEAR_KM and the coarse ones out to the horizon distance (or horizon_km)."""
+        near, far = self._tiles(cam, job, horizon_km)
+        layers = [self._grid(('near',) + tuple(sorted(near)), lambda: core.DEM(sorted(near)), job,
+                             'Loading terrain near the camera (%d tiles)...' % len(near))]
+        if far:
+            layers.append(self._grid(('far',) + tuple(sorted(far)), lambda: core.DEM(sorted(far), coarse=True), job,
+                                     'Loading distant terrain (%d tiles at 3 arc-seconds)...' % len(far)))
         fine = self._fine_path(cam)
         if self.ws.dem['source'] == '3dep10' and not fine and job:
             job.warn('%s: the workspace uses the 3DEP 10 m DEM, but no downloaded 3DEP grid covers %.0f km around this '
                      'camera; using SRTM. Download it again in the portal (DEM card).' % (cam['name'], self.ws.dem['radius_km']))
-        if not fine:
-            return coarse
-        with self.lock:
-            dem = self.dems.get((key, fine))
-        if dem is None:
-            if job:
-                job.say('DEM: USGS 3DEP 10 m (%s) within %.0f km, SRTM beyond' % (os.path.basename(fine), self.ws.dem['radius_km']))
-            dem = core.LayeredDEM(dem3dep.load(fine), coarse, name=os.path.basename(fine))
-            with self.lock:
-                self.dems[(key, fine)] = dem
-        return dem
+        if fine:
+            layers.insert(0, self._grid(('3dep', fine), lambda: dem3dep.load(fine), job,
+                                        'DEM: USGS 3DEP 10 m (%s) within %.0f km, SRTM beyond'
+                                        % (os.path.basename(fine), self.ws.dem['radius_km'])))
+        return core.Terrain(layers, max_range_m=1000 * (horizon_km or self._horizon_km(cam)),
+                            fine_step_m=10.0 if fine else None, name=os.path.basename(fine) if fine else 'srtm')
 
     def _load_session(self, job, cam):
         dem = self._dem(cam, job)
@@ -651,7 +664,7 @@ class Portal:
                 job.warn('%s: %s' % (cam['name'], msg[9:]))
             else:
                 job.say(msg)
-        c, mat, overlay = panorama.run(paths, (cam['lat'], cam['lon'], cam['elev_m']), self._tiles(cam),
+        c, mat, overlay = panorama.run(paths, (cam['lat'], cam['lon'], cam['elev_m']), self._tiles(cam)[0],
                                        self.ws.path('calibration'), cam['id'], hfov0=cam.get('hfov0') or DEFAULT_HFOV,
                                        glyphs='auto', log=log, frames_out=frames, dem=self._dem(cam))
         mag, toward = core.lean_description(c)
@@ -775,7 +788,37 @@ class Portal:
         ws = self._need_ws()
         cam = ws.camera(req['camera'])
         return {'frames': self._frames(cam), 'landmarks': cam['landmarks'], 'calibration': cam['calibration'],
-                'proposal': cam.get('proposal'), 'rev': cam.get('rev', 0), 'site': [cam['lat'], cam['lon'], cam['elev_m']], 'name': cam['name']}
+                'proposal': cam.get('proposal'), 'rev': cam.get('rev', 0), 'site': [cam['lat'], cam['lon'], cam['elev_m']], 'name': cam['name'],
+                'horizon': {'km': self._horizon_km(cam), 'terrain': {'tiles': len(cam.get('tiles') or []),
+                                                                     'downloaded': cam.get('tiles_downloaded') or 0,
+                                                                     'missing': cam.get('tiles_missing') or []}}}
+
+    def setup_horizon(self, req):
+        """Job: set how far out a camera's skyline and rays follow the terrain (km), and reload the camera with it
+        (terrain tiles it needs are downloaded). A calibration fitted with another distance stays in use; calibrate
+        again to fit the new skyline."""
+        ws = self._need_ws()
+        cam = ws.camera(req['camera'])
+        km = float(req['km'])
+        if not HORIZON_KM_LIM[0] <= km <= HORIZON_KM_LIM[1]:
+            raise ValueError('The horizon distance must be %g to %g km.' % HORIZON_KM_LIM)
+
+        def run(job):
+            old = self._horizon_km(cam)
+            with self.lock:
+                cam['horizon_km'] = km
+            try:
+                self._load_session(job, cam)
+            except Exception:
+                with self.lock:
+                    cam['horizon_km'] = old
+                raise
+            self.frame_cache.pop(cam['id'], None)
+            self.ref_cache.pop(cam['id'], None)
+            with self.lock:
+                ws.save()
+            return {'camera': cam['id'], 'horizon_km': km}
+        return {'job': self._submit('horizon', cam['id'], run)}
 
     def setup_landmarks(self, req):
         """Replace a camera's landmarks: {gcp: [[u, v, lat, lon, elev]], stills: [frame ids], names: [...], info:
@@ -796,8 +839,7 @@ class Portal:
 
     def _specs(self, cam):
         """The calibrations a frame can be drawn with, by name: (correction, pose offsets, report).
-        'calibration' is the one in use, 'previous' the one before it, 'proposal' the proposed one (the automatic
-        result with any manual adjustment) and 'auto' the proposal's automatic result."""
+        'calibration' is the one in use, 'previous' the one before it and 'proposal' the proposed one."""
         cal, prop = cam['calibration'], cam.get('proposal')
         out = {'calibration': (cal['c'], cal.get('pose_offsets'), cal.get('report')) if cal.get('c') else
                ([0, 0, 0, cam.get('hfov0') or DEFAULT_HFOV, 0, 0], None, None)}
@@ -806,7 +848,6 @@ class Portal:
             out['previous'] = (prev, None, None)
         if prop:
             out['proposal'] = (prop['c'], prop.get('pose_offsets'), prop.get('report'))
-            out['auto'] = (prop['auto']['c'], prop['auto'].get('pose_offsets'), prop.get('report'))
         return out
 
     @staticmethod
@@ -874,146 +915,26 @@ class Portal:
             out['fov'] = [float(np.degrees(np.arctan2(r[0], r[1])) % 360) for r in rays]
         return out
 
-    # The proposal: the calibrate job proposes a calibration (cam['proposal']) instead of applying it. It can be
-    # moved, rotated and stretched on any frame (setup_adjust) or edited as numbers (setup_proposal), and is
-    # applied by setup_accept. It is kept in workspace.json, so a reload keeps the adjustments.
-    ADJUST_SCALE = {'camera': [0.1, 0.1, 0.1, 0.5], 'position': [0.1, 0.1, 0.1, 0.002]}
+    # The proposal: the calibrate job proposes a calibration (cam['proposal']) instead of applying it; it is
+    # checked on the frames and applied by setup_accept (or dropped). It is kept in workspace.json.
 
     def _proposal(self, cam):
         prop = cam.get('proposal')
         if not prop:
-            raise ValueError('%s has no proposed calibration: run Calibrate, or Adjust the calibration in use.'
+            raise ValueError('%s has no proposed calibration: run Calibrate first.'
                              % cam['name'])
         return prop
 
-    def setup_adjust(self, req):
-        """Move/rotate/stretch the proposed skyline on one frame. A = [[a, b, tx], [c, d, ty]] maps the line's
-        pixels now (1-based) to where they should be (a 2-D similarity drawn by the page). scope 'camera' changes
-        the shared correction (d_azimuth, d_tilt, roll, HFOV: every frame moves); 'position' changes the offsets
-        of this still's camera position (pan, tilt, roll, scale: only the stills with its X/Y/Z move). The
-        motion is turned into those four values by least squares over the frame's skyline points (and a coarse
-        pixel grid, so the fit is defined when little skyline is in view)."""
-        from scipy.optimize import least_squares
-        ws = self._need_ws()
-        cam = ws.camera(req['camera'])
-        s = self._session(req)
-        f = self._frame_info(cam, req['frame'])
-        scope = req.get('scope', 'camera')
-        if scope not in self.ADJUST_SCALE:
-            raise ValueError('scope must be camera or position')
-        if scope == 'position' and f['kind'] != 'still':
-            raise ValueError('Only stills have camera positions of their own: adjust panorama frames with '
-                             '"Whole camera".')
-        A = np.asarray(req['A'], float).reshape(2, 3)
-        if not np.isfinite(A).all():
-            raise ValueError('Invalid adjustment.')
-        w, h = f['size']
-        m = core.CameraModel(s.cam, s.model.dem, w, h)
-        with self.lock:
-            prop = self._proposal(cam)
-            c = core.full_correction(prop['c']).astype(float)
-            po = json.loads(json.dumps(prop.get('pose_offsets') or {}))
-            rep = prop.get('report')
-            q0 = self._frame_pose(f, c, po, rep)
-            u, v, front = m.project(s.sky_rays, q0)
-            ok = front & (u >= 1) & (u <= w) & (v >= 1) & (v <= h)
-            sky = s.sky_rays[ok][:: max(1, int(ok.sum()) // 300)]
-            gu, gv = np.meshgrid(np.linspace(0.1, 0.9, 5) * w, np.linspace(0.1, 0.9, 3) * h)
-            grid = m.pixel_rays(np.column_stack([gu.ravel(), gv.ravel()]), q0)
-            rays = np.vstack([sky, grid])
-            wt = np.r_[np.ones(len(sky)), np.full(len(grid), 0.3 if len(sky) >= 20 else 1.0)]
-            u0, v0, _ = m.project(rays, q0)
-            target = np.column_stack([u0, v0]) @ A[:, :2].T + A[:, 2]
-            key = core.pose_key(f['bar'])
-            o = dict(po.get(key) or {})
-            if scope == 'camera':
-                x0 = c[:4].copy()
-
-                def pose(x):
-                    cc = c.copy()
-                    cc[:4] = x
-                    return self._frame_pose(f, cc, po, rep)
-            else:
-                x0 = np.array([o.get('pan') or 0.0, o.get('tilt') or 0.0, o.get('roll') or 0.0, o.get('scale') or 1.0])
-
-                def pose(x):
-                    return core.pose_from_bar(f['bar'], c, {key: dict(pan=x[0], tilt=x[1], roll=x[2], scale=x[3])})
-
-            def resid(x):
-                uu, vv, _ = m.project(rays, pose(x))
-                return np.r_[(uu - target[:, 0]) * wt, (vv - target[:, 1]) * wt]
-            sol = least_squares(resid, x0, x_scale=self.ADJUST_SCALE[scope], method='lm')
-            if not np.isfinite(sol.x).all():
-                raise ValueError('That adjustment cannot be made by turning the camera.')
-            uu, vv, _ = m.project(rays[:len(sky)] if len(sky) else rays, pose(sol.x))
-            n = len(uu)
-            res_px = float(np.sqrt(np.mean((uu - target[:n, 0]) ** 2 + (vv - target[:n, 1]) ** 2)))
-            if scope == 'camera':
-                c[:4] = sol.x
-                c[0] = (c[0] + 180) % 360 - 180
-                prop['c'] = c.tolist()
-            else:
-                how = o.get('how', '') if o.get('applied') else ''
-                o.update(pan=float(sol.x[0]), tilt=float(sol.x[1]), roll=float(sol.x[2]), scale=float(sol.x[3]),
-                         applied=True, manual=True, how=(how.split(' + manual')[0] + ' + manual') if how else 'manual')
-                o.setdefault('n_stills', 0)
-                po[key] = o
-                prop['pose_offsets'] = po
-            prop['adjusted'] = True
-            ws.save()
-        return {'proposal': _safe(prop), 'residual_px': res_px}
-
     def setup_proposal(self, req):
-        """action 'start': propose the calibration in use (to adjust it by hand without a new fit); 'reset': back
-        to the automatic result; 'discard': drop the proposal; 'set': c (6 values) and/or offset {key, pan, tilt,
-        roll, scale} typed in."""
+        """action 'discard': drop the camera's proposal (the calibration in use stays)."""
         ws = self._need_ws()
         cam = ws.camera(req['camera'])
-        act = req.get('action')
+        if req.get('action') != 'discard':
+            raise ValueError('Unknown action %r' % req.get('action'))
         with self.lock:
-            if act == 'start':
-                cal = cam['calibration']
-                c = list(core.full_correction(cal['c'] if cal.get('c') else
-                                              [0, 0, 0, cam.get('hfov0') or DEFAULT_HFOV, 0, 0]))
-                po = cal.get('pose_offsets') if cal.get('c') else None
-                cam['proposal'] = _safe({'c': c, 'pose_offsets': po or {}, 'report': cal.get('report') if cal.get('c') else None,
-                                         'source': cal.get('source') if cal.get('c') else 'raw bar values',
-                                         'auto': {'c': c, 'pose_offsets': po or {}}, 'adjusted': False,
-                                         'from': 'calibration in use', 'when': now(),
-                                         'dem': cal.get('dem') if cal.get('c') else None})
-            elif act == 'reset':
-                prop = self._proposal(cam)
-                prop['c'], prop['pose_offsets'] = list(prop['auto']['c']), json.loads(json.dumps(prop['auto'].get('pose_offsets') or {}))
-                prop['adjusted'] = False
-            elif act == 'discard':
-                cam.pop('proposal', None)
-            elif act == 'set':
-                prop = self._proposal(cam)
-                if req.get('c') is not None:
-                    c = core.full_correction(np.asarray(req['c'], float))
-                    lim = core.full_limits(CORRECTION_LIM)
-                    if not np.isfinite(c).all() or (c < lim[:, 0]).any() or (c > lim[:, 1]).any():
-                        raise ValueError('Correction out of range: %s' % ', '.join('%s %g..%g' % (n, *l) for n, l in zip(edgefit.NAMES, lim)))
-                    prop['c'] = c.tolist()
-                if req.get('offset'):
-                    x = req['offset']
-                    key = str(x['key'])
-                    vals = [float(x.get(k, d)) for k, d in (('pan', 0), ('tilt', 0), ('roll', 0), ('scale', 1))]
-                    if not np.isfinite(vals).all() or max(abs(v) for v in vals[:3]) > 20 or not 0.5 <= vals[3] <= 2:
-                        raise ValueError('Position offset out of range (pan/tilt/roll within 20 deg, stretch 0.5..2).')
-                    po = prop.setdefault('pose_offsets', {}) or {}
-                    o = dict(po.get(key) or {})
-                    how = o.get('how', '') if o.get('applied') else ''
-                    o.update(pan=vals[0], tilt=vals[1], roll=vals[2], scale=vals[3], applied=True, manual=True,
-                             how=(how.split(' + manual')[0] + ' + manual') if how else 'manual')
-                    o.setdefault('n_stills', 0)
-                    po[key] = o
-                    prop['pose_offsets'] = po
-                prop['adjusted'] = True
-            else:
-                raise ValueError('Unknown action %r' % act)
+            cam.pop('proposal', None)
             ws.save()
-        return {'proposal': _safe(cam.get('proposal'))}
+        return {'proposal': None}
 
     def setup_accept(self, req):
         """Job: apply a camera's proposed calibration. An adjusted proposal is first measured again on the
@@ -1106,7 +1027,8 @@ class Portal:
         lon = float(req['lon']) if req.get('lon') is not None else cam['lon']
         elev = float(req['elev_m']) if req.get('elev_m') is not None else (cam['elev_m'] if cam else None)
         s = self.sessions.get(cam['id']) if cam else None
-        dem = s.model.dem if s and _site_m(s.cam, (lat, lon)) < 1 else self._dem(dict(cam or {}, lat=lat, lon=lon, name='site'))
+        dem = (s.model.dem if s and _site_m(s.cam, (lat, lon)) < 1 else
+               self._dem(dict(cam or {}, lat=lat, lon=lon, name='site'), horizon_km=NEAR_KM))
         g = float(dem(lat, lon))
         marks = reference.site_check(lat, lon, dem, elev, float(req.get('radius_m') or 1500))
         label = self._dem_label(dict(cam or {}, lat=lat, lon=lon))
@@ -1274,10 +1196,11 @@ class Portal:
         overlay = 'calibration/%s_proposal_overlay.jpg' % cid
         edgefit.overlay(fit, core.full_correction(c_old if c_old else c_start),
                         cam['calibration'].get('pose_offsets') if c_old else None, c, ws.path(*overlay.split('/')))
-        rep.update(when=now(), start=start, overlay=overlay, c_previous=list(core.full_correction(c_old)) if c_old else None)
+        rep.update(when=now(), start=start, overlay=overlay, c_previous=list(core.full_correction(c_old)) if c_old else None,
+                   horizon_km=self._horizon_km(cam))
         if np.isfinite(rep['worst_still_offset_deg']) and rep['worst_still_offset_deg'] > 0.3:
             job.warn('%s: one still is %.2f deg off its silhouette after the calibration. Smoke or haze along the skyline '
-                     'often does that to a single still; check it, adjust the line by hand or add a landmark on that '
+                     'often does that to a single still; check it, shorten the horizon distance or add a landmark on that '
                      'camera position.' % (cam['name'], rep['worst_still_offset_deg']))
         for l in rep['landmarks']:
             if l['error_deg'] is not None and l['error_deg'] > 0.2:
@@ -1290,7 +1213,7 @@ class Portal:
                                      'dem': s.dem_label,
                                      'source': 'edge fit (%d frames%s)' % (rep['n_frames'], ', %d landmarks' % n_lm if n_lm else '')})
             ws.save()
-        job.say('Proposed; check it, adjust it if needed, then accept it.')
+        job.say('Proposed; check it, then accept it.')
         return {'camera': cid, 'proposal': cam['proposal']}
 
     def _accept(self, job, cid):
@@ -1548,7 +1471,7 @@ ROUTES = {
     '/api/export_all': 'export_all',
     # calibration step
     '/api/setup/frames': 'setup_frames', '/api/setup/landmarks': 'setup_landmarks', '/api/setup/predict': 'setup_predict',
-    '/api/setup/summit': 'setup_summit', '/api/calibrate': 'calibrate', '/api/setup/adjust': 'setup_adjust',
+    '/api/setup/summit': 'setup_summit', '/api/calibrate': 'calibrate', '/api/setup/horizon': 'setup_horizon',
     '/api/setup/proposal': 'setup_proposal', '/api/setup/accept': 'setup_accept',
     # reference points, site check, DEM
     '/api/reference/fetch': 'reference_fetch', '/api/reference/candidates': 'reference_candidates',

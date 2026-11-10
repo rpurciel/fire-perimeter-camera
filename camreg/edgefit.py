@@ -58,7 +58,7 @@ class EdgeFrame:
     kind: str = 'still'        # 'still' or 'panorama'
     note: str = ''             # why it is not used, if it isn't
     off: list = field(default_factory=lambda: [0.0, 0.0])   # pan, tilt offset (deg) of its position
-    turn: tuple = (0.0, 1.0)   # roll (deg) and scale of its position (a manual adjustment; core.turn_pose)
+    turn: tuple = (0.0, 1.0)   # roll (deg) and scale of its position (old hand adjustments; core.turn_pose)
     blurred: dict = field(default_factory=dict, repr=False)
     s: float = np.nan          # best edge contrast near the starting pose (normalisation)
 

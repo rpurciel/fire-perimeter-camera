@@ -5,6 +5,7 @@
 | `fire_camera.py` | **The one launcher.** Starts the local server and opens the portal: create or open a fire workspace, add its cameras, load and calibrate them, then draw and export perimeters. |
 | `camreg/core.py` | Numerical core: SRTM mosaic and other lat/lon grids with bilinear lookup (a fine grid over SRTM: `LayeredDEM`), DEM skyline, pinhole projection, pixel → terrain ray march, Huber objective with Nelder-Mead fit, CSV/KML export, `.mat` save/load. Not tied to one camera. |
 | `camreg/edgefit.py` | The calibration: puts the DEM skyline on the images' silhouette edges, with optional landmarks (see [How the calibration works](#how-the-calibration-works-edge-fit)). |
+| `camreg/tiles.py` | The 1° terrain tiles a camera's horizon distance needs: found in the DEM folder, or downloaded from the AWS Terrain Tiles into `downloads/srtm/` (see [Terrain tiles](#terrain-tiles-and-the-horizon-distance)). |
 | `camreg/dem3dep.py` | USGS 3DEP 1/3 arc-second (about 10 m) elevation around a fire's cameras, downloaded from the USGS 3DEP ImageServer (no account) and cached in `downloads/3dep/` (see [Elevation model and reference points](#elevation-model-dem-and-reference-points)). |
 | `camreg/reference.py` | Points with known coordinates around a camera: NOAA NGS survey marks, OpenStreetMap peaks and towers, FAA obstacles. Landmark candidates (visibility, skyline, accuracy) and the site check. |
 | `camreg/combine.py` | Combines the fire lines of several cameras into one perimeter per time (see [Combining cameras](#combining-cameras)). |
@@ -48,9 +49,11 @@ The map needs internet for its tiles. Everything else is local. The old single-c
    - **Bar readings:** if the stills folder has no `stills_index.csv` (or it lists none of the folder's
      images), every still's info bar is read (`camstills.index`). The bar font and the height of the black
      bar are found automatically. Unreadable stills are listed in `review.csv`, never guessed.
-   - **DEM:** the SRTM tiles within 90 km are looked up in the DEM folder; missing ones are listed (terrain
-     and skyline there are not modelled), but only a camera with no tile at all fails. If the workspace uses
-     the USGS 3DEP 10 m DEM (portal, **Elevation model** card), it is used within its radius, SRTM beyond.
+   - **DEM:** the 1° terrain tiles out to the camera's horizon distance (default 90 km; calibration step) are
+     looked up in the DEM folder and its `downloads/srtm/`; missing ones are downloaded once (see
+     [Terrain tiles](#terrain-tiles-and-the-horizon-distance)). Tiles within 40 km are used at full resolution,
+     the rest at 3 arc-seconds. If the workspace uses the USGS 3DEP 10 m DEM (portal, **Elevation model**
+     card), it is used within its radius.
    - **Site:** a warning if the camera height is below the DEM ground at its site, or if the ground right
      around the camera rises above the middle of its main views (the site or height is then off; see **Check
      site**).
@@ -60,7 +63,7 @@ The map needs internet for its tiles. Everything else is local. The old single-c
    - **Frames:** every panorama frame and a few fire-day stills: for the camera's two most common positions,
      the first and last daylight still (night images, grey infrared, are skipped). Click a thumbnail to view
      it; scroll zooms, drag pans. Red: the modelled skyline of the calibration in use; green: the proposed
-     calibration; yellow dashes: the proposal's automatic result, once you have adjusted it.
+     calibration.
    - **Landmarks (optional):** **Suggest landmarks** lists the peaks, lookouts and towers with known coordinates
      that fall in the frame (fetched once per camera; see [Reference points](#reference-points-landmark-candidates)),
      drawn as ◇ where the calibration puts them. Click one, then click the feature itself in the image, and
@@ -70,36 +73,24 @@ The map needs internet for its tiles. Everything else is local. The old single-c
      **Snap to summit** moves the point to the highest DEM point within 300 m. Landmarks pin the calibration
      where the skyline alone is weak, above all the pan direction; on the **stills** they set that camera
      position's own offset (see below). After a calibration the list shows each one's error.
+   - **Horizon distance** (slider, 20–250 km, per camera): how far out the modelled skyline (the red and green
+     lines, and what Calibrate fits) and the rays that drape the edges follow the terrain. Longer reaches distant
+     peaks on clear days; on hazy or smoky frames a shorter distance matches the horizon you can see. Changing it
+     reloads the camera (downloading the terrain tiles it needs, once); calibrate again afterwards. The
+     calibration details say which distance a calibration was fitted with.
    - **Calibrate this camera / all cameras:** about a minute per camera. The result is a **proposal**: the
      calibration in use doesn't change until you accept it. Calibration details show the correction (in use,
-     automatic, proposed), and for each frame where the real silhouette is relative to the modelled skyline
-     before and after (0 = on it), plus the overlay image.
-   - **Check, adjust & accept:** look at the green line on the frames and move it into place by hand if needed:
-     - **On the image:** drag the green line (or the ⊕) to move it; drag a round handle to rotate it and a square
-       one to stretch it, about the ⊕ (which sits on the line in the middle of the view). Hold Shift for a tenth
-       of the mouse motion. Zoom in for precise work.
-     - **Keys:** arrows move 1 px (Shift: 10 px), `[` `]` rotate 0.05° (Shift: 0.5°), `−` `=` stretch 0.1%
-       (Shift: 1%). The ← → ↑ ↓ ⟲ ⟳ − + buttons do the same.
-     - **Values:** type the correction (or the position's offsets) directly.
-     - **Applies to:** *Whole camera* changes the camera's correction (azimuth, tilt, roll, field of view at Z 1),
-       so the line moves on every frame and still; *This camera position* changes only the stills taken at this
-       frame's X/Y/Z (their own pan, tilt, roll and stretch). Panorama frames take *Whole camera* only (they are
-       drawn with their own small pan error from the fit, see below).
-     - The page draws the move as a flat move/rotate/stretch of the line; on release the server turns it into
-       camera angles (least squares over the line's points) and redraws from them, so the line can shift by a
-       fraction of a pixel (a pan isn't exactly a sideways shift of the image).
-     - **Accept calibration** measures the accepted calibration on the calibration frames again (a few seconds
-       to a minute; the remaining offsets, landmark errors and overlay are for it), then puts it in use; its
-       source then reads "… + manual adjustment". **Reset to automatic** undoes your adjustments; **Discard
-       proposal** keeps the calibration in use. **Adjust the calibration in use** (when there is no proposal)
-       proposes the current calibration, to adjust it without a new fit.
-     - The proposal is saved in the workspace, so a reload keeps your adjustments; Open the workspace warns
-       about proposals not yet accepted.
+     proposed), and for each frame where the real silhouette is relative to the modelled skyline before and
+     after (0 = on it), plus the overlay image.
+   - **Check & accept:** look at the green line on the frames (red: the calibration in use). **Accept
+     calibration** puts it in use; **Discard proposal** keeps the calibration in use. The proposal is saved in
+     the workspace; Open the workspace warns about proposals not yet accepted. (Hand adjustment of the line was
+     removed; calibrations made with it still load, with their positions' roll and stretch.)
 5. **Calibration space** (in the workspace, switch at any time, top left): per camera, check and fix.
    - **Camera card:** edit the name, location, height or stills folder (Apply reloads the camera); **Read
      bars again** re-reads the whole stills folder.
-   - **Calibration card:** the calibration in use with its results and overlay, **Landmarks, calibration &
-     adjustment →** (it says when a proposal is waiting there), and the camera's panoramas (add or remove).
+   - **Calibration card:** the calibration in use with its results and overlay, **Landmarks & calibration →**
+     (it says when a proposal is waiting there), and the camera's panoramas (add or remove).
    - **Camera pose, Registration:** manual tools (landmarks on the timeline's stills, trace/auto skyline,
      Optimize, Reset).
    - **Calibration files:** import a `.mat` calibration of this camera (same site within 500 m) from the
@@ -147,6 +138,24 @@ Verdi: about the same on both.
 at 2571 m, exactly at the NGS lookout mark, so the bar's 2567 m height is 4 m *below* the ground there. Chimney
 Peak's 3DEP summit (2492 m) is 32 m from the earlier fitted site: from that site, rays more than about 5° below
 horizontal hit the summit 20–40 m away. Use **Check site** (below) and put the camera on its summit or mast.
+
+### Terrain tiles and the horizon distance
+
+Each camera's terrain reaches its **horizon distance** (calibration step slider, 20–250 km, default 90 km):
+the 360° skyline, the calibration's fit and the rays that drape the edges stop there. The 1° tiles it needs
+(`N39W120.hgt` …) are looked for in the DEM folder (the project's two SRTM tiles) and in
+`downloads/srtm/`; missing ones are downloaded once from the AWS Terrain Tiles
+(`https://s3.amazonaws.com/elevation-tiles-prod/skadi/N40/N40W120.hgt.gz`, no account), about 10 MB each,
+kept gzipped (git-ignored). They are 1 arc-second like SRTM; in the US they are USGS NED (bare earth), so
+they differ by metres from SRTM. Tiles within 40 km of the camera are used at full resolution, the others at
+3 arc-seconds (about 90 m; enough for distant ridges, and 30 tiles then take about 170 MB of memory instead of
+3 GB). A tile the service doesn't have (open sea) is noted and skipped.
+
+Before this, only the two tiles in the project folder were used: everything north of 40° N (about 60 km
+north of the Hawk Fire cameras, in their view) and beyond 120°–121° W was missing from the skyline.
+
+The model has no atmospheric refraction: beyond about 100 km it puts distant peaks a little low (about 0.09°
+at 150 km).
 
 ### Check site
 
@@ -295,9 +304,8 @@ at Z 1, and the lean of the pan axis).
 - **Landmarks** add a robust term (Huber, 0.05°): one landmark 0.2° off weighs about a third of one frame's
   edge alignment, so a misclick cannot dominate.
 - **Without a panorama** the stills are used for the shared correction (and no position offsets).
-- **Hand adjustment** (calibration step) changes the shared correction or a position's offsets; a position can
-  then also carry a roll and a stretch (scale) of its own, applied after the rest of its pose
-  (`core.turn_pose`).
+- **Older calibrations** made with hand adjustment (since removed) can carry a roll and a stretch (scale) per
+  position, applied after the rest of its pose (`core.turn_pose`); they still load.
 - **Remaining offsets in the reports** come from a search of ±40 px across and ±50 px down for the best edge
   contrast, on a grid 1 px tall (a sharp edge is only a few px tall: a coarser grid can step over it when the
   line is an odd number of px off). On a flat skyline the sideways value is weakly determined.
@@ -363,7 +371,7 @@ skyline fit alone):
 ## Adding another camera
 
 In the portal: **Add camera** (name, location, height, panorama, stills folder), then **Load cameras**, then
-the calibration step (landmarks optional, **Calibrate**, check and adjust, **Accept**).
+the calibration step (landmarks optional, **Calibrate**, check, **Accept**).
 If its stills are still a recording, make them first with `camstills.extract`. Nothing in `camreg/` or
 `camstills/` is camera-specific; another network's bar font needs `camstills.train` (above).
 
@@ -384,7 +392,7 @@ If its stills are still a recording, make them first with `camstills.extract`. N
   - **Undo** (Fire edges card, or Ctrl/⌘+Z) removes the last vertex while a line is being drawn; otherwise it undoes the last change to the camera's edges: an edge added, deleted with ✕, Clear edges, or edges added by importing a calibration.
   - **Clear edges** removes only the edges drawn on the current still (after a confirmation); edges on other stills stay.
   - Freehand draws while the mouse button is held down.
-- **Pose:** no sliders. The model camera on each still takes that frame's info-bar pan (X), tilt (Y) and zoom (Z), plus that camera position's own offsets (pan/tilt from the calibration step, and a roll/stretch if it was adjusted by hand there), plus one fixed **mount correction** for the camera (azimuth offset, tilt offset, roll, HFOV at Z1, and the lean of the pan axis toward east and north).
+- **Pose:** no sliders. The model camera on each still takes that frame's info-bar pan (X), tilt (Y) and zoom (Z), plus that camera position's own offsets (pan/tilt from the calibration step; older hand-adjusted calibrations may add a roll/stretch), plus one fixed **mount correction** for the camera (azimuth offset, tilt offset, roll, HFOV at Z1, and the lean of the pan axis toward east and north).
   - The correction comes from the panorama calibration. Without one it starts at zero, i.e. the raw bar values with a 60° HFOV. **Optimize correction** fits it from landmarks and the skyline, which may be clicked on different stills, and it then applies to every frame.
   - The lean is shown under the pose table. Optimize keeps it fixed unless **"also fits the pan-axis lean"** is ticked, which needs landmarks on stills at several pan directions. Normally it comes from the panorama.
   - With a panorama calibration loaded you usually don't need Optimize. Use Auto skyline or landmarks to check it. Optimizing on one still can pull the correction toward that still's errors (e.g. skyline points on a smoke plume).

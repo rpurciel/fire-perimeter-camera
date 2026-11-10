@@ -67,6 +67,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.active { outline: 2px solid var(--accent); outline-offset: 1px; }
 button.small { font-size: 12px; padding: 3px 8px; margin-top: 6px; }
 .btns { display: flex; flex-wrap: wrap; gap: 6px; }
+[hidden] { display: none !important; }   /* the hidden attribute wins over display rules such as .btns */
 .row { display: flex; gap: 6px; margin-bottom: 6px; }
 .row input, .row select { flex: 1; min-width: 0; }
 .row.export { margin: 10px 0 0; }
@@ -154,14 +155,11 @@ img.overlay { width: 100%; display: block; margin: 6px 0; border-radius: 4px; bo
 h2.sub { margin-top: 12px; }
 #result table { margin: 6px 0; }
 .adj-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 0; }
-.adj-row.nudges button { min-width: 30px; padding-left: 6px; padding-right: 6px; }
-.adj-row.nudges span:not(:first-child) { margin-left: 6px; }
 table.pose input { width: 76px; text-align: right; font: inherit; padding: 1px 3px; }
 #propStatus b.pending { color: var(--warn, #d97706); }
-canvas.adj-move { cursor: move; } canvas.adj-rotate { cursor: grab; } canvas.adj-stretch { cursor: ew-resize; }
 table.pose th.sub { color: var(--text); font-weight: 600; padding-top: 6px; text-align: left; }
 .warn-text { color: var(--warn); }
-/* calibration step: the side panel scrolls on its own, so the image stays in view while adjusting */
+/* calibration step: the side panel scrolls on its own, so the image stays in view */
 @media (min-width: 901px) {
   body.setup aside { position: sticky; top: 8px; align-self: start; max-height: calc(100vh - 16px); overflow-y: auto; padding-right: 2px; }
 }
@@ -180,3 +178,6 @@ table.pose th.sub { color: var(--text); font-weight: 600; padding-top: 6px; text
 #candList li .go { flex: 1; }
 #candList li.sky .go { font-weight: 600; }
 .cand-src { font-size: 10px; padding: 0 4px; border-radius: 3px; background: var(--btn); color: var(--muted); }
+#horizon { flex: 1; min-width: 120px; }
+.horizon { margin-bottom: 8px; }
+.horizon p { margin: 2px 0 0; }

@@ -21,6 +21,7 @@ import time
 SCHEMA = 1
 SAFE_FILE = re.compile(r'^[\w.\- ()]+$')
 DEFAULT_DEM = {'source': 'srtm', 'radius_km': 25.0}   # 'srtm' (30 m tiles) or '3dep10' (USGS 3DEP 10 m near the cameras, SRTM beyond)
+DEFAULT_HORIZON_KM = 90.0    # how far out a camera's skyline and rays follow the terrain (calibration step)
 DEFAULT_HFOV = 60.0          # starting Z1 field of view (the cameras' nominal 60 deg); the panorama fit or Optimize refines it
 
 
@@ -44,7 +45,7 @@ def now():
 def new_camera(cid, name, lat, lon, elev_m, stills_dir):
     return {'id': cid, 'name': name, 'lat': float(lat), 'lon': float(lon), 'elev_m': float(elev_m),
             'stills_dir': stills_dir, 'glyphs': '', 'bar_px': None, 'image_size': None, 'hfov0': DEFAULT_HFOV,
-            'panoramas': [], 'index': None, 'tiles': [], 'tiles_missing': [],
+            'panoramas': [], 'index': None, 'tiles': [], 'tiles_missing': [], 'horizon_km': DEFAULT_HORIZON_KM,
             'calibration': {'c': None, 'source': 'none', 'note': '', 'report': None},
             'landmarks': {'gcp': [], 'stills': [], 'names': [], 'info': []}, 'skyline': {'uv': [], 'still': ''},
             'edges': [], 'ui': {}}

@@ -1,4 +1,4 @@
-"""USGS 3DEP 1/3 arc-second (about 10 m) elevation around a fire's cameras, for core.LayeredDEM.
+"""USGS 3DEP 1/3 arc-second (about 10 m) elevation around a fire's cameras, the finest layer of core.Terrain.
 
 The grid is fetched from the USGS 3DEP ImageServer (no account or key needed):
 
@@ -16,7 +16,7 @@ USGS_13_n40w120.tif tiles) can be read with read_geotiff and cached the same way
     box = box_around([(lat, lon), ...], radius_km=25)
     path = fetch(box, out_dir, log=print)             # or find(box, out_dir) for one already there
     fine = load(path)                                 # core.GeoGrid (memory-mapped)
-    dem = core.LayeredDEM(fine, core.DEM(srtm_tiles))
+    dem = core.Terrain([fine, core.DEM(srtm_tiles)], fine_step_m=10.0)
 """
 import io
 import json

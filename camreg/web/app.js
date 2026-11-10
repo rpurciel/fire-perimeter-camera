@@ -69,7 +69,7 @@ const currentStill = (k = K) => k.cfg.stills[k.still];
 // the lean tips the pan axis lean_east toward east and lean_north toward north.
 // po: the camera's per-position offsets ({poseKey: {pan, tilt, roll, scale}}: pan/tilt from the edge calibration,
 // as the camera doesn't return exactly to the pan/tilt its bar reports; roll and scale (image magnification)
-// from a hand adjustment in the calibration step), as core.pose_from_bar.
+// from a hand adjustment made before that was removed), as core.pose_from_bar.
 const poseKey = (st) => `${(st.X + 0).toFixed(2)},${(st.Y + 0).toFixed(2)},${(st.Z + 0).toFixed(1)}`;
 function poseFor(still, c = K.c, po = K ? K.calib.pose_offsets : null) {
   const o = po && po[poseKey(still)], X = still.X + (o ? o.pan || 0 : 0), Y = still.Y + (o ? o.tilt || 0 : 0);
@@ -660,7 +660,7 @@ function renderPanorama() {
   box.innerHTML = '';
   if (m.has_proposal) {
     const p = document.createElement('p'); p.className = 'small warn-text';
-    p.textContent = 'A proposed calibration is waiting in the calibration step: check, adjust and accept it there.';
+    p.textContent = 'A proposed calibration is waiting in the calibration step: check and accept it there.';
     box.appendChild(p);
   }
   if (!rep) { box.insertAdjacentHTML('beforeend', '<p class="muted small">No calibration report yet. Use the calibration step.</p>'); return; }

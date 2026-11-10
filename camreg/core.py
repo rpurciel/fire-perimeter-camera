@@ -15,6 +15,7 @@ interchangeable:
   * local frame is east/north/up from the camera, spherical Earth R = 6371 km,
     with the same d^2/(2R) curvature drop everywhere.
 """
+import gzip
 import os
 import re
 
@@ -27,8 +28,12 @@ R_EARTH = 6371000.0
 # --------------------------------------------------------------------- DEM ---
 
 def read_hgt(path):
-    """Read one SRTM .hgt tile (big-endian int16, north row first); voids -> NaN."""
-    raw = np.fromfile(path, dtype='>i2')
+    """Read one SRTM .hgt tile (big-endian int16, north row first; .hgt.gz too); voids -> NaN."""
+    if path.lower().endswith('.gz'):
+        with gzip.open(path, 'rb') as f:
+            raw = np.frombuffer(f.read(), dtype='>i2')
+    else:
+        raw = np.fromfile(path, dtype='>i2')
     n = int(round(np.sqrt(raw.size)))
     if n * n != raw.size:
         raise ValueError('Invalid HGT grid: %s' % path)
@@ -91,9 +96,13 @@ class DEM(GeoGrid):
     the MATLAB [W, E(:,2:end)] concatenation.
     """
 
-    def __init__(self, paths):
+    def __init__(self, paths, coarse=False):
+        """coarse: keep every 3rd sample of 1 arc-second tiles (3 arc-seconds, about 90 m) in float32, for the
+        distant terrain of a long horizon (a full-resolution mosaic of many tiles would take gigabytes)."""
         corners = [_hgt_corner(p) for p in paths]
         tiles = [read_hgt(p) for p in paths]
+        if coarse:
+            tiles = [t[::3, ::3].astype(np.float32) if t.shape[0] == 3601 else t.astype(np.float32) for t in tiles]
         n = tiles[0].shape[0]
         if any(t.shape[0] != n for t in tiles):
             raise ValueError('All tiles must have the same resolution')
@@ -102,7 +111,7 @@ class DEM(GeoGrid):
         lon0 = min(c[1] for c in corners)
         nlat = (max(c[0] for c in corners) + 1 - lat0) * (n - 1) + 1
         nlon = (max(c[1] for c in corners) + 1 - lon0) * (n - 1) + 1
-        z = np.full((nlat, nlon), np.nan)          # row 0 = southern edge
+        z = np.full((nlat, nlon), np.nan, np.float32 if coarse else float)          # row 0 = southern edge
         order = sorted(range(len(paths)), key=lambda i: (-corners[i][1], -corners[i][0]))
         for i in order:
             r0 = (corners[i][0] - lat0) * (n - 1)
@@ -111,27 +120,37 @@ class DEM(GeoGrid):
         super().__init__(z, lat0, lon0, self.step, self.step)
 
 
-class LayeredDEM:
-    """A fine elevation grid (e.g. USGS 3DEP 10 m, see dem3dep) over a coarse one (the SRTM mosaic).
+DEFAULT_RANGE_M = 90000.0        # how far skylines and rays follow the terrain unless the DEM says otherwise
 
-    The fine value is used wherever it exists, the coarse one elsewhere. CameraModel samples rays finely
-    (fine_step_m) out to the distance where the fine grid ends in the worst direction (fine_radius_m)."""
 
-    def __init__(self, fine, coarse, fine_step_m=10.0, name=''):
-        self.fine, self.coarse = fine, coarse
-        self.fine_step_m = float(fine_step_m)
+class Terrain:
+    """A camera's terrain: elevation layers, finest first (e.g. USGS 3DEP 10 m from dem3dep, the full-resolution
+    SRTM tiles near the camera, coarse tiles far out), each used where it has data, and how far out skylines
+    and rays follow it (max_range_m, the horizon distance).
+
+    With fine_step_m, rays are sampled that finely out to where the first layer ends in the worst direction
+    (fine_radius_m); without it, at the models' own steps as for a single DEM."""
+
+    def __init__(self, layers, max_range_m=DEFAULT_RANGE_M, fine_step_m=None, name=''):
+        self.layers = [l for l in layers if l is not None]
+        self.max_range_m = float(max_range_m)
+        self.fine_step_m = float(fine_step_m) if fine_step_m else None
         self.name = name
 
     def __call__(self, lat, lon):
-        z = self.fine(lat, lon)
-        bad = ~np.isfinite(z)
-        if bad.any():
-            z = np.where(bad, self.coarse(lat, lon), z)
+        z = self.layers[0](lat, lon)
+        for layer in self.layers[1:]:
+            bad = ~np.isfinite(z)
+            if not bad.any():
+                break
+            z = np.where(bad, layer(lat, lon), z)
         return z
 
     def fine_radius_m(self, lat, lon):
-        """Distance from (lat, lon) to the nearest edge of the fine grid (0 if outside)."""
-        s, w, n, e = self.fine.bounds
+        """Distance from (lat, lon) to the nearest edge of the first layer (0 if outside, or no fine sampling)."""
+        if not self.fine_step_m:
+            return 0.0
+        s, w, n, e = self.layers[0].bounds
         k = np.radians(1.0) * R_EARTH
         d = min((lat - s) * k, (n - lat) * k, (lon - w) * k * np.cos(np.radians(lat)),
                 (e - lon) * k * np.cos(np.radians(lat)))
@@ -140,7 +159,7 @@ class LayeredDEM:
 
 def sample_distances(dem, cam, step, d_max, d_min=0.0):
     """Distances along a ray from the camera: every step metres, but every dem.fine_step_m within the
-    fine grid of a LayeredDEM. With a plain DEM: np.arange(d_min, d_max + step / 2, step) exactly as before."""
+    fine grid of a Terrain that has one. Otherwise np.arange(d_min, d_max + step / 2, step) exactly as before."""
     r = dem.fine_radius_m(cam[0], cam[1]) if hasattr(dem, 'fine_radius_m') else 0.0
     if r <= d_min:
         return np.arange(d_min, d_max + step / 2, step)
@@ -179,23 +198,24 @@ class CameraModel:
     is cropped.
     """
 
-    def __init__(self, cam, dem, nx, ny, step_m=50.0, max_range_m=90000.0):
+    def __init__(self, cam, dem, nx, ny, step_m=50.0, max_range_m=None):
+        """max_range_m: how far skylines and rays follow the terrain; default the DEM's (a Terrain's horizon
+        distance), else DEFAULT_RANGE_M."""
         self.cam = np.asarray(cam, float)
         self.dem = dem
         self.nx = nx
         self.ny = ny
         self.step_m = step_m
-        self.max_range_m = max_range_m
+        self.max_range_m = float(max_range_m or getattr(dem, 'max_range_m', DEFAULT_RANGE_M))
 
     # -- horizon -------------------------------------------------------------
     def horizon_rays(self, az_lo=0.0, az_hi=105.0, az_step=0.1, d=None, chunk=400):
         """Rays to the DEM skyline (max elevation angle) for each azimuth.
 
-        d: distances sampled along each azimuth; default every 120 m from 100 m to 90 km (every
-        fine_step_m inside the fine grid of a LayeredDEM)."""
+        d: distances sampled along each azimuth; default every 120 m from 100 m to max_range_m (every
+        fine_step_m inside the fine grid of a Terrain that has one)."""
         if d is None:
-            d = (np.arange(100, 90000 + 1, 120) if not hasattr(self.dem, 'fine_radius_m') else
-                 sample_distances(self.dem, self.cam, 120.0, 90000.0, 100.0))
+            d = sample_distances(self.dem, self.cam, 120.0, self.max_range_m, 100.0)
         lat_c, lon_c, z_c = self.cam
         az = np.arange(round((az_hi - az_lo) / az_step) + 1) * az_step + az_lo
         sky = np.empty(len(az))
@@ -346,7 +366,7 @@ def pose_from_bar(bar, c, offsets=None):
     offsets: optional {pose_key(bar): {'pan': deg, 'tilt': deg, 'roll': deg, 'scale': factor, ...}} (or
     [pan, tilt]): the camera does not return exactly to the pan/tilt its bar reports, and a position's own offset
     is added to its X and Y first (edgefit fits them). A position's roll (deg, about the optical axis) and scale
-    (image magnification, > 1 zooms in) come from a manual adjustment in the calibration step; both are optional.
+    (image magnification, > 1 zooms in) come from hand adjustments in older calibrations; both are optional.
     Zoom is treated as optical magnification, tan(hfov/2) = tan(hfov_Z1/2) / Z
     (an assumption; not yet checked against zoomed stills).
     """
